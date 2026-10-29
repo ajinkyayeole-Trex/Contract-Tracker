@@ -255,6 +255,8 @@
   // ---------- Filters ----------
   const inScope = () => state.contracts.filter((c) => !state.scope || c.region === state.scope);
   // ---------- Column filters (one per column of the Contracts table, in the same order) ----------
+  // KMs operated in the week of the latest Revenue Share Report (the BP's "Total KMs" grand total)
+  const weekKm = (c) => (c.revenueReport && c.revenueReport.totalKm) || null;
   const YN = ['Yes', 'No'];
   const ynText = (b) => (b ? 'Yes' : 'No');
   const COLF = [
@@ -279,6 +281,7 @@
     { k: 'lines', text: 'Line code', get: (c) => c.lines.map((l) => l.code + ' ' + (l.route || '')).join(' '), extra: ['MinG mismatch', 'No lines'] },
     { k: 'rtAmt', opts: () => ['Has RT amount', 'No RT amount'], get: (c) => (C.totals(c).rtAmt ? 'Has RT amount' : 'No RT amount') },
     { k: 'annualMileage', opts: () => ['Filled in', 'Missing'], get: (c) => (c.annualMileage ? 'Filled in' : 'Missing') },
+    { k: 'weekKm', opts: () => ['In this week\'s report', 'Not in report'], get: (c) => (weekKm(c) ? 'In this week\'s report' : 'Not in report') },
     { k: 'comments', text: 'Search', get: (c) => c.comments || '' },
   ];
   function colMatch(c) {
@@ -353,6 +356,7 @@
     const val = (c) => {
       if (key === 'stage') return c.stage === C.REJECTED ? -1 : C.STAGES.indexOf(c.stage);
       if (key === 'annualMileage') return c.annualMileage || 0;
+      if (key === 'weekKm') return weekKm(c) || 0;
       if (key === 'rtAmt') return C.totals(c).rtAmt;
       return String(c[key] || '').toLowerCase();
     };
@@ -378,7 +382,45 @@
     const cards = [kpi('var(--g)', state.scope ? `Signed – ${regionName(state.scope)}` : 'Contracts signed – N/W + South', signed.length + `<span>of ${L.length} BPs</span>`, `${L.length ? Math.round((signed.length / L.length) * 100) : 0}% signed`, 'Signed')];
     if (!state.scope) C.OPTIONS.region.forEach((r) => cards.push(kpi(r === 'South' ? 'var(--pu)' : 'var(--bl)', `Signed – ${regionName(r)}`,
       `<button class="cell-link" data-goto-region="${esc(r)}" data-group="Signed">${signedIn(r)}</button><span>of ${ofRegion(r)} BPs</span>`, `${ofRegion(r) ? Math.round((signedIn(r) / ofRegion(r)) * 100) : 0}% signed`)));
+    // Annual KMs from the Vehicles Annex (Art. 2.1)
+    const withKm = L.filter((c) => c.annualMileage);
+    const km = withKm.reduce((a, c) => a + c.annualMileage, 0);
+    cards.push(kpi('var(--am)', 'Annual KMs – Vehicles Annex', `${km >= 1e7 ? fmt(km / 1e7, 2) + '<span>Cr km</span>' : km >= 1e5 ? fmt(km / 1e5, 1) + '<span>L km</span>' : fmt(km, 0) + '<span>km</span>'}`, `${withKm.length} of ${L.length} BPs have the figure`));
+    // Weekly discrepancies (contract MinG vs paid)
+    const d = discrepancies();
+    cards.push(kpi('var(--rd)', 'Weekly discrepancies', `<button class="cell-link" data-goto-disc>${d.rows.length}</button><span>line${d.rows.length === 1 ? '' : 's'} · ${d.bps} BP${d.bps === 1 ? '' : 's'}</span>`, d.period ? 'Revenue report ' + esc(d.period) : 'No revenue report yet'));
     $('#kpis').innerHTML = cards.join('');
+  }
+
+  // Lines where the paid ₹/km (latest Revenue Share Report) differs from the contract MinG, or a paid line not in the contract
+  function discrepancies() {
+    const rows = []; const periods = {}; const noAnnex = [];
+    inScope().forEach((c) => {
+      const m = C.mingCheck(c);
+      if (m.status === 'no-report') return;
+      periods[m.period] = (periods[m.period] || 0) + 1;
+      // No Lines Annex in the tracker yet: nothing to compare against, so list the BP separately
+      if (!c.lines.length) { if (m.extra.length) noAnnex.push({ c, n: m.extra.length }); return; }
+      m.items.filter((i) => i.status === 'mismatch').forEach((i) => rows.push({ c, code: i.code, contract: i.contract, paid: i.paid, diff: i.diff, kind: i.diff > 0 ? 'Paid more than contract' : 'Paid less than contract' }));
+      m.extra.forEach((x) => rows.push({ c, code: x.code, contract: null, paid: x.paid, diff: null, kind: 'Paid, but line not in the contract' }));
+    });
+    rows.sort((a, b) => a.c.bpName.localeCompare(b.c.bpName) || a.code.localeCompare(b.code));
+    const period = Object.keys(periods).sort((a, b) => periods[b] - periods[a])[0] || '';
+    return { rows, period, bps: new Set(rows.map((r) => r.c.id)).size, noAnnex };
+  }
+  function renderDiscrepancies() {
+    const el = $('#disc-tbl'); if (!el) return;
+    const d = discrepancies();
+    $('#disc-period').textContent = d.period ? '· ' + d.period : '';
+    if (!d.period) { el.innerHTML = '<tbody><tr><td class="empty" style="padding:16px">No Revenue Share Report checked yet.</td></tr></tbody>'; return; }
+    const note = d.noAnnex.length ? `<tfoot><tr><td colspan="8" class="muted" style="padding:10px 12px;white-space:normal">Can't check yet, because no Lines Annex is in the tracker: ${d.noAnnex.map((x) => `<button class="cell-link" data-open="${esc(x.c.id)}">${esc(x.c.bpName)}</button> (${x.n} line${x.n === 1 ? '' : 's'} paid)`).join(', ')}. Add their Lines Annex to compare.</td></tr></tfoot>` : '';
+    if (!d.rows.length) { el.innerHTML = '<tbody><tr><td class="empty" style="padding:16px">✓ No discrepancies this week: every paid ₹/km matches the contract.</td></tr></tbody>' + note; return; }
+    el.innerHTML = `<thead><tr><th>BP</th><th>Region</th><th>Line code</th><th class="num">Contract MinG (₹/km)</th><th class="num">Paid (₹/km)</th><th class="num">Difference</th><th class="num">Annual KMs</th><th>What's wrong</th></tr></thead><tbody>` +
+      d.rows.map((r) => `<tr class="row-bad"><td><button class="bp-link" data-open="${esc(r.c.id)}">${esc(r.c.bpName)}</button></td><td>${esc(r.c.region || '—')}</td><td class="mono">${esc(r.code)}</td>
+        <td class="num">${r.contract != null ? r.contract.toFixed(2) : '—'}</td><td class="num">${r.paid.toFixed(2)}</td>
+        <td class="num ${r.diff != null ? 'days-hot' : 'muted'}">${r.diff != null ? (r.diff > 0 ? '+' : '') + r.diff.toFixed(2) : '—'}</td>
+        <td class="num">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">—</span>'}</td>
+        <td><span class="sp sp-r">${esc(r.kind)}</span></td></tr>`).join('') + '</tbody>' + note;
   }
 
   // ---------- North/West vs South ----------
@@ -398,6 +440,7 @@
       rejected: rej.length,
       lines: list.reduce((a, c) => a + c.lines.length, 0),
       amt: amt(list), amtSigned: amt(signed), amtPending: amt(pending), amtRejected: amt(rej),
+      km: list.reduce((a, c) => a + (c.annualMileage || 0), 0),
     };
   }
   // Rows of the comparison table: [label, key, group to open when clicked, is it a sub-row, is it money]
@@ -410,6 +453,7 @@
     ['Rejected, waiting on a revised contract', 'rejected', 'Rejected', 0],
     ['Total RT amount', 'amt', '', 0, 1],
     ['Signed RT amount', 'amtSigned', 'Signed', 1, 1],
+    ['Annual KMs (Vehicles Annex)', 'km', '', 0, 2],
   ];
   function renderRegionCompare() {
     const cols = regionColumns();
@@ -417,7 +461,7 @@
     const all = regionStats(state.contracts.filter((c) => c.region));
     const cell = (r, row, s) => {
       const v = s[row[1]];
-      const shown = row[4] ? (v ? inr(v) : '—') : v;
+      const shown = row[4] === 2 ? (v ? fmt(v, 0) + ' km' : '—') : row[4] ? (v ? inr(v) : '—') : v;
       if (!row[2] || !v) return `<td class="num">${shown}</td>`;
       return `<td class="num"><button class="cell-link" data-goto-region="${esc(r)}" data-group="${esc(row[2])}">${shown}</button></td>`;
     };
@@ -615,9 +659,10 @@
         <td class="codes">${c.lines.length ? c.lines.map((l) => `<span class="code-chip ${mingBad(c, l.code) ? 'bad' : ''}" title="${esc((l.route || '') + (l.minG != null ? ' · MinG ₹' + l.minG.toFixed(2) + '/km' : ''))}">${esc(l.code || '?')}</span>`).join('') : '<span class="muted">—</span>'}</td>
         <td class="num">${t.rtAmt ? inr(t.rtAmt) : '<span class="muted">—</span>'}</td>
         <td class="num">${c.annualMileage ? fmt(c.annualMileage, 0) : '<span class="muted">—</span>'}</td>
+        <td class="num" title="${esc(c.revenueReport && c.revenueReport.period ? 'Revenue Share Report ' + c.revenueReport.period : '')}">${weekKm(c) ? fmt(weekKm(c), 2) : '<span class="muted">—</span>'}</td>
         <td><input class="ipt ipt-note" data-note="${esc(c.id)}" value="${esc(c.comments)}" ${ro ? 'disabled' : ''} placeholder="Add a note…"></td>
       </tr>`;
-    }).join('') || `<tr><td colspan="14" class="empty" style="padding:18px">${state.contracts.length ? 'No BPs match these filters. Clear the search or pick another stage.' : 'No contracts yet. Click “＋ Add contract” to add the first one from Salesforce.'}</td></tr>`;
+    }).join('') || `<tr><td colspan="15" class="empty" style="padding:18px">${state.contracts.length ? 'No BPs match these filters. Clear the search or pick another stage.' : 'No contracts yet. Click “＋ Add contract” to add the first one from Salesforce.'}</td></tr>`;
     $('#row-count').textContent = `${list.length} of ${inScope().length} BPs${state.scope ? ' in ' + regionName(state.scope) : ''}`;
     $$('#edit-tbl th[data-sort]').forEach((th) => {
       const on = th.dataset.sort === state.sort.key;
@@ -662,7 +707,7 @@
 
   function renderAll() {
     state.contracts.forEach(C.withDocDefaults);
-    renderHeader(); renderScope(); renderKpis(); renderRegionCompare(); renderLinesTab();
+    renderHeader(); renderScope(); renderKpis(); renderRegionCompare(); renderDiscrepancies(); renderLinesTab();
     renderStageFilters(); renderRows(); renderAttention();
     if (state.openId) renderDrawer();
   }
@@ -1011,14 +1056,14 @@
   // ---------- Export ----------
   function exportCsv() {
     const head = ['BP name', 'Region', 'Owner', 'Contract stage', 'Docs received', 'Account created on SF', 'Bank details updated', 'Onboarding form filled',
-      'Docs pending', 'Comments', 'Line codes', 'RT Kms', 'MinG', 'RT Amt', 'Total RT Amt', 'Annual mileage (km)', 'Rejection reason', 'Rejection details', 'Revised sent for signing', 'Last updated'];
+      'Docs pending', 'Comments', 'Line codes', 'RT Kms', 'MinG', 'RT Amt', 'Total RT Amt', 'Annual mileage (km)', 'Weekly KMs (revenue report)', 'Rejection reason', 'Rejection details', 'Revised sent for signing', 'Last updated'];
     const yn2 = (b) => (b ? 'Yes' : 'No');
     const list = sorted(state.contracts.filter((c) => matches(c)));
     const rows = list.map((c) => {
       const r = C.latestRejection(c);
       const per = (k) => c.lines.map((l) => `${l.code}:${l[k] ?? ''}`).join(', ');
       return [c.bpName, c.region, c.owner, c.stage, yn2(c.docsReceived), yn2(c.sfAccountCreated), c.bankDetails, yn2(c.onboardingForm),
-        c.docsPending, c.comments, c.lines.map((l) => l.code).join(', '), per('rtKms'), per('minG'), per('rtAmt'), C.totals(c).rtAmt, c.annualMileage ?? '',
+        c.docsPending, c.comments, c.lines.map((l) => l.code).join(', '), per('rtKms'), per('minG'), per('rtAmt'), C.totals(c).rtAmt, c.annualMileage ?? '', weekKm(c) ?? '',
         r ? r.category : '', r ? r.reason : '', r ? (r.resentAt ? 'Yes, ' + r.resentAt.slice(0, 10) : 'No') : '', String(c.updatedAt).slice(0, 10)];
     });
     const csv = [head].concat(rows).map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
@@ -1070,6 +1115,7 @@
 
 
     document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-goto-disc], #btn-disc-all')) { state.lf.bad = !!e.target.closest('[data-goto-disc]'); state.lf.q = ''; $('#lq').value = ''; showTab('lines'); renderLinesTab(); return; }
       const go = e.target.closest('[data-goto-stage]');
       if (go) { state.f.stage = go.dataset.gotoStage; state.f.group = ''; state.f.region = ''; state.f.attn = false; showTab('edit'); renderStageFilters(); renderRows(); return; }
       const fs = e.target.closest('[data-filter-stage]');

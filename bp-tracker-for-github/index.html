@@ -6,7 +6,7 @@
 <title>Flix India – BP Contract Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=20261027a">
+<link rel="stylesheet" href="styles.css?v=20261030a">
 </head>
 <body>
 
@@ -44,6 +44,11 @@
     <div class="tw"><table class="dt" id="reg-tbl"></table></div>
     <p class="sn" id="reg-note" hidden></p>
   </div>
+
+  <div class="card">
+    <div class="ct"><span>⚠️ Weekly discrepancies <small id="disc-period"></small></span><span style="display:flex;gap:8px;align-items:center"><small>Contract MinG vs what Finance paid in the Revenue Share Report</small><button class="gh-btn" id="btn-disc-all">See all lines</button></span></div>
+    <div class="tw"><table class="dt" id="disc-tbl"></table></div>
+  </div>
 </main>
 </div>
 
@@ -76,7 +81,8 @@
           <th>Docs pending</th>
           <th>Line codes</th>
           <th class="num" data-sort="rtAmt">RT amount<br>(all lines)</th>
-          <th class="num" data-sort="annualMileage">Annual mileage (km)</th>
+          <th class="num" data-sort="annualMileage">Annual mileage (km)<br><small>Vehicles Annex</small></th>
+          <th class="num" data-sort="weekKm">Weekly KMs<br><small>Revenue report</small></th>
           <th>Comments</th>
         </tr></thead>
         <tbody id="rows"></tbody>
@@ -270,10 +276,10 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/pdf.min.js"></script>
-<script src="core.js?v=20261027a"></script>
-<script src="pdfparse.js?v=20261027a"></script>
-<script src="secure.js?v=20261027a"></script>
-<script src="ghstore.js?v=20261027a"></script>
-<script src="app.js?v=20261027a"></script>
+<script src="core.js?v=20261030a"></script>
+<script src="pdfparse.js?v=20261030a"></script>
+<script src="secure.js?v=20261030a"></script>
+<script src="ghstore.js?v=20261030a"></script>
+<script src="app.js?v=20261030a"></script>
 </body>
 </html>

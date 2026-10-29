@@ -45,7 +45,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mn { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; }
 
 /* KPI cards */
-.kr { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+.kr { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 9px; }
 .kpi { background: var(--cd); border: 1px solid var(--br); border-radius: var(--r); padding: 13px 15px; position: relative; overflow: hidden; }
 .kpi::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--ac, var(--g)); }
 .kl { font-size: 9px; font-weight: 500; letter-spacing: .6px; text-transform: uppercase; color: var(--mt); margin-bottom: 6px; }
