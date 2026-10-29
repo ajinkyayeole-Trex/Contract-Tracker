@@ -84,11 +84,14 @@
     if (key === 'rtKms') return l.rtAmt !== null && l.minG ? round2(l.rtAmt / l.minG) : null;
     return null;
   }
+  const isDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
   function normaliseLine(l) {
     l = l || {};
     const out = { code: String(l.code || '').trim().toUpperCase(), rtAmt: num(l.rtAmt), rtKms: num(l.rtKms), minG: num(l.minG), calc: NUM_KEYS.includes(l.calc) ? l.calc : null };
     const empty = NUM_KEYS.filter((k) => out[k] === null);
     // A rate printed in the contract is kept exactly, even if it isn't RT amount ÷ RT kms to the paisa
+    if (isDate(l.from)) out.from = l.from;
     if (l.printed && empty.length === 0) { out.calc = null; out.printed = true; if (l.route) out.route = String(l.route); if (l.source) out.source = String(l.source); return out; }
     if (empty.length === 1) out.calc = empty[0];
     else if (!out.calc && empty.length === 0) out.calc = 'minG';
@@ -110,6 +113,36 @@
     if (!k) return null;
     return list.find((c) => !c.archived && c.id !== exceptId &&
       [c.bpName].concat(c.aliases || []).some((a) => nameKey(a) === k)) || null;
+  }
+  // BPs whose name looks like this one (typing mistakes, "Pvt Ltd", spacing…). Best 2 first. score 1 = same name.
+  function lev(a, b) {
+    const m = a.length, n = b.length; if (!m || !n) return Math.max(m, n);
+    let prev = Array.from({ length: n + 1 }, (_, j) => j);
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[n];
+  }
+  const looseKey = (n) => String(n || '').toLowerCase().replace(/&/g, ' ').replace(/\b(pvt|private|ltd|limited|the)\b|[^a-z0-9]/g, '');
+  function nameScore(a, b) {
+    const ka = nameKey(a), kb = nameKey(b);
+    if (ka && ka === kb) return 1;
+    let best = 0;
+    [[ka, kb], [looseKey(a), looseKey(b)]].forEach(([x, y]) => {
+      if (x.length < 4 || y.length < 4) return;
+      const short = Math.min(x.length, y.length);
+      if (short >= 5 && (x.startsWith(y) || y.startsWith(x))) best = Math.max(best, 0.9);
+      best = Math.max(best, 1 - lev(x, y) / Math.max(x.length, y.length));
+    });
+    return Math.round(best * 100) / 100;
+  }
+  function similarBps(list, name, exceptId) {
+    if (String(name || '').trim().length < 3) return [];
+    return list.filter((c) => !c.archived && c.id !== exceptId)
+      .map((c) => ({ c, score: Math.max(...[c.bpName].concat(c.aliases || []).map((a) => nameScore(name, a))) }))
+      .filter((x) => x.score >= 0.8).sort((a, b) => b.score - a.score).slice(0, 2);
   }
   // Line codes that appear under more than one BP
   function duplicateLines(list) {
@@ -197,6 +230,8 @@
     c.bpName = String(c.bpName || '').trim();
     if (!c.bpName) throw new Error('Enter the BP name.');
     c.lines = (c.lines || []).map(normaliseLine).filter((l) => l.code || l.rtAmt || l.rtKms);
+    const eff = c.contract && isDate(c.contract.effectiveFrom) ? c.contract.effectiveFrom : null;
+    if (eff) c.lines.forEach((l) => { if (!l.from) l.from = eff; });
     if (!ALL_STAGES.includes(c.stage)) c.stage = STAGES[0];
     c.createdAt = c.updatedAt = c.stageSince = now;
     c.history = [{ at: now, by: user, text: 'Contract created at stage “' + c.stage + '”' + (input.historyNote ? '. ' + input.historyNote : '') }];
@@ -231,6 +266,15 @@
       }]);
       if (k === 'stage') next.stageSince = now;
     });
+    // A new contract (PDF) replaced or changed lines: keep the old ones as history, with the dates they applied
+    if (changed && changes.lines && patch.contract && !sameValue(c.lines, next.lines)) {
+      const newEff = isDate(patch.contract.effectiveFrom) ? patch.contract.effectiveFrom : null;
+      next.lines = next.lines.map((l) => (l.from || !newEff ? l : Object.assign({}, l, { from: newEff })));
+      const to = newEff ? addDays(newEff, -1) : now.slice(0, 10);
+      const past = lineDiff(c.lines, next.lines).filter((d) => d.from && ['removed', 'replaced-old', 'changed'].includes(d.type))
+        .map((d) => Object.assign({}, d.from, { from: lineFrom(c, d.from), to, endedBy: d.type === 'changed' ? 'new rate' : d.by || '' }));
+      if (past.length) next.pastLines = (c.pastLines || []).concat(past);
+    }
     if (changed && patch.historyNote) next.history = next.history.concat([{ at: now, by: user, text: String(patch.historyNote) }]);
     if (changed) next.updatedAt = now;
     return next;
@@ -333,17 +377,31 @@
   }
 
   // Compare contract MinG (Lines Annex reference rate) with the rate paid in the weekly revenue share report.
+  // Date a line applies from: its own date, or the contract's effective date
+  function lineFrom(c, l) {
+    if (l && isDate(l.from)) return l.from;
+    return c && c.contract && isDate(c.contract.effectiveFrom) ? c.contract.effectiveFrom : null;
+  }
   function mingCheck(c) {
     const rep = c.revenueReport;
     if (!rep || !rep.rates) return { status: 'no-report', items: [], extra: [] };
+    const end = isDate(rep.periodEnd) ? rep.periodEnd : isDate(rep.receivedOn) ? rep.receivedOn : null;
     const items = c.lines.filter((l) => l.code).map((l) => {
       const paid = rep.rates[l.code];
+      const f = lineFrom(c, l);
+      if (end && f && f > end) return { code: l.code, contract: l.minG, paid: paid === undefined ? null : paid, status: 'not-started', from: f };
       if (paid === undefined) return { code: l.code, contract: l.minG, paid: null, status: 'not-in-report' };
       const diff = round2(paid - l.minG);
       return { code: l.code, contract: l.minG, paid, diff, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' };
     });
     const codes = new Set(c.lines.map((l) => l.code));
-    const extra = Object.keys(rep.rates).filter((k) => !codes.has(k)).map((k) => ({ code: k, paid: rep.rates[k] }));
+    const extra = [];
+    Object.keys(rep.rates).filter((k) => !codes.has(k)).forEach((k) => {
+      // A line that was still running in the report's week (replaced since): compare with its old rate
+      const old = end && (c.pastLines || []).filter((p) => p.code === k && (!p.to || p.to >= addDays(end, -6))).pop();
+      if (old) { const diff = round2(rep.rates[k] - old.minG); items.push({ code: k, contract: old.minG, paid: rep.rates[k], diff, past: true, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' }); }
+      else extra.push({ code: k, paid: rep.rates[k] });
+    });
     const bad = items.some((i) => i.status === 'mismatch') || extra.length;
     return { status: bad ? 'mismatch' : 'ok', period: rep.period, items, extra };
   }
@@ -427,7 +485,7 @@
     opts = opts || {};
     const m = opts.forceNew ? null : matchBp(list, r.bpName);
     const c = m ? m.c : null;
-    const lines = (r.lines || []).map((l) => normaliseLine({ code: l.code, route: l.route, rtKms: l.rtKms, minG: l.minG, rtAmt: l.rtAmt,
+    const lines = (r.lines || []).map((l) => normaliseLine({ code: l.code, route: l.route, rtKms: l.rtKms, minG: l.minG, rtAmt: l.rtAmt, from: r.effectiveFrom || null,
       calc: l.kmsWorkedOut ? 'rtKms' : null, printed: !l.kmsWorkedOut && l.rtKms != null && l.minG != null && l.rtAmt != null, source: 'pdf' }));
     const stamped = !!r.envelopeId;
     const signed = r.stage === 'Signed' || (!stamped && opts.signedAnswer === true);
@@ -473,6 +531,8 @@
       return plan;
     }
     const diff = lines.length ? lineDiff(c.lines, lines) : [];
+    // Lines that didn't change keep the date they started
+    lines.forEach((l) => { if (diff.some((d) => d.code === l.code)) return; const o = c.lines.find((x) => x.code === l.code); const f = o && lineFrom(c, o); if (f) l.from = f; else delete l.from; });
     const mileage = r.annualMileage && r.annualMileage !== c.annualMileage ? { from: c.annualMileage, to: r.annualMileage } : null;
     const text = diff.map(describeDiff).filter(Boolean);
     plan.diff = diff;
@@ -567,6 +627,6 @@
   return {
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
-    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults,
+    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, similarBps, nameScore, lineFrom,
   };
 });

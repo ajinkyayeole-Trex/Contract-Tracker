@@ -10,6 +10,9 @@
   const lakh = (n) => (n >= 1e7 ? fmt(n / 1e7, 2) + '<span>Cr</span>' : fmt(n / 1e5, 1) + '<span>L</span>');
   const when = (iso) => new Date(iso).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   const clone = (o) => JSON.parse(JSON.stringify(o));
+  const isoDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+  const dShort = (d) => (isoDay(d) ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
+  const daysUntil = (d) => Math.round((new Date(d + 'T12:00:00') - new Date(new Date().toISOString().slice(0, 10) + 'T12:00:00')) / 864e5);
   const isActive = (c) => c.accountActivation === 'Active' || c.accountActivation === 'Already active';
   const IN_PROGRESS = C.STAGES.slice(0, 4);
   // Groups used in the North/West vs South comparison
@@ -337,6 +340,51 @@
     });
   }
 
+  // ---------- Choose columns (Contracts table) ----------
+  // [key, label, table columns (1 = BP name, always shown)]
+  const COL_GROUPS = [
+    ['Contract', [['region', 'Region', [2]], ['stage', 'Contract stage', [3]], ['docs', 'Contract docs · RCM clause', [4, 5]]]],
+    ['Onboarding', [['onboarding', 'Docs, SF account, bank, form', [6, 7, 8, 9, 10]]]],
+    ['Lines & money', [['lines', 'Line codes', [11]], ['rtAmt', 'RT amount', [12]], ['km', 'Annual km · Weekly km', [13, 14]], ['comments', 'Comments', [15]]]],
+  ];
+  const COL_ALL = COL_GROUPS.flatMap(([, items]) => items.map((x) => x[0]));
+  const COL_PRESETS = { All: COL_ALL, Finance: ['region', 'stage', 'lines', 'rtAmt', 'km'], Onboarding: ['region', 'stage', 'onboarding'] };
+  const COLS_KEY = 'flix-bp-tracker-columns';
+  state.cols = (() => { try { const v = JSON.parse(localStorage.getItem(COLS_KEY) || 'null'); return Array.isArray(v) ? v.filter((k) => COL_ALL.includes(k)) : COL_ALL.slice(); } catch (e) { return COL_ALL.slice(); } })();
+  const colOn = (k) => state.cols.includes(k);
+  const presetName = () => Object.keys(COL_PRESETS).find((p) => COL_PRESETS[p].length === state.cols.length && COL_PRESETS[p].every(colOn)) || 'Custom';
+  function applyColumns() {
+    const hide = COL_GROUPS.flatMap(([, items]) => items).filter((x) => !colOn(x[0])).flatMap((x) => x[2]);
+    let st = $('#col-hide'); if (!st) { st = document.createElement('style'); st.id = 'col-hide'; document.head.appendChild(st); }
+    st.textContent = hide.map((n) => `#edit-tbl tr > :nth-child(${n})`).join(',') + (hide.length ? '{display:none}' : '');
+    // A filter on a hidden column would hide BPs without showing why, so clear it
+    let cleared = false;
+    hide.forEach((n) => { const f = COLF[n - 1]; if (f && state.cf[f.k]) { delete state.cf[f.k]; cleared = true; } });
+    const b = $('#btn-cols'); const p = presetName();
+    if (b) { b.textContent = '▦ Columns' + (p === 'All' ? '' : ' · ' + p); b.classList.toggle('on', p !== 'All'); }
+    return cleared;
+  }
+  function saveColumns() { try { localStorage.setItem(COLS_KEY, JSON.stringify(state.cols)); } catch (e) { /* blocked */ } }
+  function drawColumnsPop() {
+    const p = presetName();
+    $('#cols-presets').innerHTML = Object.keys(COL_PRESETS).concat(['Custom']).map((n) => `<button type="button" class="${n === p ? 'on' : ''}" data-preset="${n}" ${n === 'Custom' ? 'disabled' : ''}>${n}</button>`).join('');
+    $('#cols-list').innerHTML = `<div class="cols-grp">Always shown</div><div class="cols-row lock">BP name <span class="sw on"></span></div>` +
+      COL_GROUPS.map(([g, items]) => `<div class="cols-grp">${esc(g)}</div>` + items.map(([k, label]) => `<div class="cols-row" data-col="${k}" role="switch" aria-checked="${colOn(k)}" tabindex="0">${esc(label)} <span class="sw ${colOn(k) ? 'on' : ''}"></span></div>`).join('')).join('');
+  }
+  function openColumns() {
+    const pop = $('#cols-pop');
+    if (!pop.hidden) { pop.hidden = true; return; }
+    drawColumnsPop(); pop.hidden = false;
+    const r = $('#btn-cols').getBoundingClientRect();
+    pop.style.top = (r.bottom + window.scrollY + 6) + 'px';
+    pop.style.left = Math.max(8, Math.min(r.left, document.documentElement.clientWidth - 310) + window.scrollX) + 'px';
+  }
+  function setColumns(list) {
+    state.cols = COL_ALL.filter((k) => list.includes(k)); saveColumns();
+    const cleared = applyColumns(); drawColumnsPop();
+    if (cleared) { renderStageFilters(); renderRows(); renderColumnFilterState(); }
+  }
+
   function matches(c, opts) {
     const f = state.f; opts = opts || {};
     if (!colMatch(c)) return false;
@@ -401,7 +449,7 @@
       periods[m.period] = (periods[m.period] || 0) + 1;
       // No Lines Annex in the tracker yet: nothing to compare against, so list the BP separately
       if (!c.lines.length) { if (m.extra.length) noAnnex.push({ c, n: m.extra.length }); return; }
-      m.items.filter((i) => i.status === 'mismatch').forEach((i) => rows.push({ c, code: i.code, contract: i.contract, paid: i.paid, diff: i.diff, kind: i.diff > 0 ? 'Paid more than contract' : 'Paid less than contract' }));
+      m.items.filter((i) => i.status === 'mismatch').forEach((i) => rows.push({ c, code: i.code, contract: i.contract, paid: i.paid, diff: i.diff, kind: (i.diff > 0 ? 'Paid more than contract' : 'Paid less than contract') + (i.past ? ' (old line)' : '') }));
       m.extra.forEach((x) => rows.push({ c, code: x.code, contract: null, paid: x.paid, diff: null, kind: 'Paid, but line not in the contract' }));
     });
     rows.sort((a, b) => a.c.bpName.localeCompare(b.c.bpName) || a.code.localeCompare(b.code));
@@ -495,9 +543,12 @@
     inScope().slice().sort((a, b) => a.bpName.localeCompare(b.bpName)).forEach((c) => {
       const m = C.mingCheck(c);
       const rows = c.lines.map((l) => {
-        const it = m.items.find((i) => i.code === l.code) || {};
+        const it = m.items.find((i) => i.code === l.code && !i.past) || {};
         return { c, l, paid: it.paid ?? null, status: m.status === 'no-report' ? 'no-report' : it.status };
-      }).concat(m.extra.map((x) => ({ c, l: { code: x.code, route: '', rtKms: null, minG: null, rtAmt: null }, paid: x.paid, status: c.lines.length ? 'extra' : 'paid-no-annex' })));
+      }).concat(m.items.filter((i) => i.past).map((i) => {
+        const pl = (c.pastLines || []).filter((p) => p.code === i.code).pop() || { code: i.code, minG: i.contract };
+        return { c, l: pl, past: true, paid: i.paid, status: i.status };
+      })).concat(m.extra.map((x) => ({ c, l: { code: x.code, route: '', rtKms: null, minG: null, rtAmt: null }, paid: x.paid, status: c.lines.length ? 'extra' : 'paid-no-annex' })));
       if (!rows.length) rows.push({ c, l: null, status: 'no-lines' });
       rows.forEach((r) => out.push(r));
     });
@@ -508,6 +559,7 @@
   const CHECK = {
     ok: '<span class="sp sp-s">✓ Matches</span>', mismatch: '<span class="sp sp-r">✕ Mismatch</span>', extra: '<span class="sp sp-r">✕ Not in contract</span>',
     'not-in-report': '<span class="sp" style="color:var(--mt);border-color:var(--br2)">Not in report</span>', 'no-report': '<span class="muted">No report yet</span>', 'no-lines': '<span class="muted">Lines Annex needed</span>', 'paid-no-annex': '<span class="sp sp-p">Paid, Lines Annex needed</span>',
+    'not-started': '<span class="sp" style="color:var(--bl);border-color:rgba(56,139,253,.4)">Not started yet</span>',
   };
   function renderLinesTab() {
     const el = $('#lines-rows'); if (!el) return;
@@ -521,13 +573,14 @@
       return `<tr class="${first ? 'bp-start' : ''} ${r.status === 'mismatch' || r.status === 'extra' ? 'row-bad' : ''}">
         ${first ? `<td rowspan="${span}" class="bp-cell"><button class="bp-link" data-open="${esc(r.c.id)}">${esc(r.c.bpName)}</button><span class="sub">${esc(r.c.region || '')}, ${esc(r.c.stage)}</span></td>
           <td rowspan="${span}" class="num bp-cell">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">Vehicles Annex needed</span>'}</td>` : ''}
-        <td class="mono">${l ? esc(l.code) : '—'}</td><td class="wrap">${l ? esc(l.route || '') : ''}</td>
+        <td class="mono">${l ? esc(l.code) : '—'}${r.past ? '<span class="sub">old line, ended ' + dShort(l.to) + '</span>' : ''}</td><td class="wrap">${l ? esc(l.route || '') : ''}</td>
+        <td>${l && r.past ? dShort(l.from) : l && C.lineFrom(r.c, l) ? dShort(C.lineFrom(r.c, l)) + (daysUntil(C.lineFrom(r.c, l)) > 0 ? '<span class="sub future">starts in ' + daysUntil(C.lineFrom(r.c, l)) + ' days</span>' : '') : '<span class="muted">—</span>'}</td>
         <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) : '—'}</td>
         <td class="num">${l && l.minG != null ? l.minG.toFixed(2) : '—'}</td>
         <td class="num">${l && l.rtAmt != null ? fmt(l.rtAmt) : '—'}</td>
         <td class="num ${diff ? 'days-hot' : ''}">${r.paid != null ? r.paid.toFixed(2) + (diff ? ` <small>(${diff > 0 ? '+' : ''}${diff.toFixed(2)})</small>` : '') : '—'}</td>
         <td class="c">${CHECK[r.status] || ''}</td></tr>`;
-    }).join('') || '<tr><td colspan="9" class="empty" style="padding:16px">No lines match.</td></tr>';
+    }).join('') || '<tr><td colspan="10" class="empty" style="padding:16px">No lines match.</td></tr>';
     const all = inScope(); let bad = 0, checked = 0;
     all.forEach((c) => { const m = C.mingCheck(c); if (m.status !== 'no-report' && c.lines.length) { checked++; if (m.status === 'mismatch') bad++; } });
     const period = (all.find((c) => c.revenueReport) || {}).revenueReport;
@@ -536,8 +589,8 @@
     $('#l-bad').classList.toggle('active', state.lf.bad);
   }
   function exportLinesCsv() {
-    const head = ['BP', 'Region', 'Stage', 'Annual mileage (km)', 'Line code', 'Route', 'RT kms', 'MinG (₹/km)', 'RT amount (₹)', 'Revenue report MinG', 'Check'];
-    const rows = lineRowsData().map((r) => [r.c.bpName, r.c.region, r.c.stage, r.c.annualMileage ?? '', r.l ? r.l.code : '', r.l ? r.l.route || '' : '', r.l ? r.l.rtKms ?? '' : '', r.l ? r.l.minG ?? '' : '', r.l ? r.l.rtAmt ?? '' : '', r.paid ?? '', r.status]);
+    const head = ['BP', 'Region', 'Stage', 'Annual mileage (km)', 'Line code', 'Route', 'Effective from', 'RT kms', 'MinG (₹/km)', 'RT amount (₹)', 'Revenue report MinG', 'Check'];
+    const rows = lineRowsData().map((r) => [r.c.bpName, r.c.region, r.c.stage, r.c.annualMileage ?? '', r.l ? r.l.code : '', r.l ? r.l.route || '' : '', r.l ? (r.past ? r.l.from : C.lineFrom(r.c, r.l)) || '' : '', r.l ? r.l.rtKms ?? '' : '', r.l ? r.l.minG ?? '' : '', r.l ? r.l.rtAmt ?? '' : '', r.paid ?? '', r.status]);
     const csv = [head].concat(rows).map((x) => x.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
@@ -742,17 +795,27 @@
   const COLS = [['rtKms', 'RT kms'], ['minG', 'MinG (₹/km)'], ['rtAmt', 'RT amount (₹)']];
   function linesTable(lines, scope, ro, opt) {
     opt = opt || {};
+    const fromCell = (l) => {
+      const v = l.from || opt.fallbackFrom || '';
+      const soon = isoDay(v) && daysUntil(v) > 0 ? `<span class="sub future">starts in ${daysUntil(v)} day${daysUntil(v) === 1 ? '' : 's'}</span>` : '';
+      return `<td><input class="ipt date ${opt.pdf && l.source === 'pdf' && l.from ? 'pdf' : ''}" type="date" data-k="from" value="${esc(v)}" ${dis} aria-label="Effective from">${soon}</td>`;
+    };
     const dis = ro ? 'disabled' : '';
     const notes = opt.notes || {};
     const body = lines.map((l, i) => { const pdfCls = opt.pdf && l.source === 'pdf' ? 'pdf' : ''; const n = notes[l.code]; return `<tr data-row="${i}">
       <td><input class="ipt ${pdfCls}" data-k="code" value="${esc(l.code || '')}" ${dis} placeholder="IN0121C" aria-label="Line code">${l.route ? `<span class="sub">${esc(l.route)}${opt.pdf ? '' : l.source === 'contract' ? ' · from signed contract' : l.source === 'pdf' ? ' · from contract PDF' : ''}</span>` : ''}</td>
       ${COLS.map(([k, label]) => `<td><input class="ipt num ${l.calc === k ? 'auto' : pdfCls}" data-k="${k}" value="${l[k] ?? ''}" ${dis} inputmode="decimal" aria-label="${label}" title="${l.calc === k ? 'Worked out automatically' : ''}">${k === 'minG' && n ? `<span class="calc ${n.cls || ''}">${esc(n.text)}</span>` : ''}</td>`).join('')}
+      ${fromCell(l)}
       <td>${ro ? '' : `<button type="button" class="del-btn" data-del-line="${i}" aria-label="Remove line">×</button>`}</td></tr>`; }).join('')
       + (opt.removed || []).map((r) => `<tr class="gone"><td><s>${esc(r.code)}</s><span class="sub">${esc(r.route || '')}${r.by ? ' · replaced by ' + esc(r.by) : ''}</span></td>
-        <td class="num"><s>${r.rtKms ?? ''}</s></td><td class="num"><s>${r.minG ?? ''}</s></td><td class="num"><s>${r.rtAmt ?? ''}</s></td><td><span class="sp sp-r gone-tag">Removed</span></td></tr>`).join('');
+        <td class="num"><s>${r.rtKms ?? ''}</s></td><td class="num"><s>${r.minG ?? ''}</s></td><td class="num"><s>${r.rtAmt ?? ''}</s></td><td></td><td><span class="sp sp-r gone-tag">Removed</span></td></tr>`).join('')
+      // Earlier lines (replaced by a newer contract), kept with the dates they applied
+      + (opt.past || []).slice().reverse().map((r) => `<tr class="past"><td><span class="mono">${esc(r.code)}</span><span class="sub">${esc(r.route || '')}</span></td>
+        <td class="num">${r.rtKms != null ? fmt(r.rtKms) : '—'}</td><td class="num">${r.minG != null ? r.minG.toFixed(2) : '—'}</td><td class="num">${r.rtAmt != null ? fmt(r.rtAmt) : '—'}</td>
+        <td colspan="2" class="muted">${dShort(r.from)} → ${dShort(r.to)}${r.endedBy ? ' · ' + (r.endedBy === 'new rate' ? 'new rate since' : 'replaced by ' + esc(r.endedBy)) : ''}</td></tr>`).join('');
     return `<div class="tw"><table class="dt lines" data-lines="${scope}">
-      <thead><tr><th>Line code</th>${COLS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th></th></tr></thead>
-      <tbody>${body || '<tr><td colspan="5" class="empty">No lines yet.</td></tr>'}</tbody>
+      <thead><tr><th>Line code</th>${COLS.map(([, l]) => `<th class="num">${l}</th>`).join('')}<th>Effective from</th><th></th></tr></thead>
+      <tbody>${body || '<tr><td colspan="6" class="empty">No lines yet.</td></tr>'}</tbody>
       <tfoot><tr>${lineTotals(lines)}</tr></tfoot></table></div>
       <p class="sn" style="margin-top:6px"><span>Fill in any two of RT kms, MinG and RT amount and the third is worked out. <span style="color:var(--g)">Green dashed</span> = worked out.</span></p>`;
   }
@@ -760,13 +823,14 @@
     const n = lines.map(C.normaliseLine);
     const amt = n.reduce((a, l) => a + (l.rtAmt || 0), 0);
     const kms = n.reduce((a, l) => a + (l.rtAmt !== null ? l.rtKms || 0 : 0), 0);
-    return `<td>${n.length} lines</td><td class="num">${fmt(n.reduce((a, l) => a + (l.rtKms || 0), 0))}</td><td class="num">${kms ? fmt(amt / kms) + ' avg' : '—'}</td><td class="num">${inr(amt)}</td><td></td>`;
+    return `<td>${n.length} lines</td><td class="num">${fmt(n.reduce((a, l) => a + (l.rtKms || 0), 0))}</td><td class="num">${kms ? fmt(amt / kms) + ' avg' : '—'}</td><td class="num">${inr(amt)}</td><td></td><td></td>`;
   }
   // Update a line while typing without re-drawing (so the cursor stays put).
   function onLineInput(lines, input) {
     const tr = input.closest('tr[data-row]'); if (!tr) return;
     const i = Number(tr.dataset.row); const k = input.dataset.k;
     if (k === 'code') { lines[i].code = input.value; return; }
+    if (k === 'from') { lines[i].from = input.value || undefined; if (!input.value) delete lines[i].from; return; }
     lines[i] = C.editLine(lines[i], k, input.value);
     COLS.forEach(([key]) => {
       const el = $(`[data-k="${key}"]`, tr);
@@ -841,7 +905,7 @@
         <label class="rcm-row">RCM clause in Commercial Annex <select class="sel sm" data-rcm ${dis}>${[['', 'Not checked'], ['yes', 'Yes'], ['no', 'No']].map(([v, l]) => `<option value="${v}"${(d.rcm || '') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
           <span class="muted">${d.rcm === 'yes' ? 'Art. ' + esc(d.rcmClause || '8.12.7') + ' GST Charge Mechanism' : d.rcm === 'no' ? 'Older template: tax clauses stop at 8.12.5' : ''}</span></label></div>
       <div class="card"><div class="ct"><span>Lines</span>${ro ? '' : '<button class="add-btn" id="d-add-line">＋ Add line</button>'}</div>
-        ${linesTable(d.lines, 'd', ro)}</div>
+        ${linesTable(d.lines, 'd', ro, { fallbackFrom: c.contract && isoDay(c.contract.effectiveFrom) ? c.contract.effectiveFrom : '', past: c.pastLines || [] })}</div>
       <div class="card"><div class="ct"><span>Details</span></div><div class="fgrid">
         <label>BP name<input class="ipt" data-df="bpName" value="${esc(d.bpName)}" ${dis}></label>
         <label>Owner<input class="ipt" data-df="owner" value="${esc(d.owner)}" ${dis} placeholder="Who is handling this BP"></label>
@@ -890,8 +954,25 @@
     fld('region').innerHTML = C.OPTIONS.region.map((o) => `<option${o === state.scope ? ' selected' : ''}>${esc(o)}</option>`).join('');
     fld('stage').innerHTML = C.STAGES.map((o) => `<option>${esc(o)}</option>`).join('');
     fld('owner').value = myName();
-    newLines = [blankLine()]; clearPdf(); $('#new-error').textContent = '';
+    newLines = [blankLine()]; clearPdf(); $('#new-error').textContent = ''; simDismissed = ''; checkSimilar();
     $('#dlg-new').showModal(); fld('bpName').focus();
+  }
+  // Similar BP names: checked while typing, and after a PDF fills the name in
+  let simDismissed = '';
+  function checkSimilar() {
+    const box = $('#bp-similar'); if (!box) return;
+    const name = fld('bpName').value.trim();
+    const target = pdf && pdf.plan && pdf.plan.bp ? pdf.plan.bp.id : null;
+    if (target || name.length < 3 || C.nameKey(name) === simDismissed) { box.hidden = true; return; }
+    const dup = C.findDuplicate(state.contracts, name);
+    const hits = dup ? [{ c: dup, score: 1 }] : C.similarBps(state.contracts, name);
+    if (!hits.length) { box.hidden = true; return; }
+    const row = (h) => `<div class="match"><b>${esc(h.c.bpName)}</b><span class="m">${esc(h.c.region || 'No region')} · ${h.c.lines.length} line${h.c.lines.length === 1 ? '' : 's'} · ${Math.round(h.score * 100)}% match</span>${stagePill(h.c.stage)}<button type="button" class="gh-btn sm" data-sim-open="${esc(h.c.id)}">Open it</button></div>`;
+    box.className = 'similar' + (dup ? ' block' : '');
+    box.innerHTML = dup
+      ? `<div class="t">✕ This BP is already in the tracker</div>${row(hits[0])}<div class="foot"><span>Open it to make changes, or attach the new contract PDF there.</span></div>`
+      : `<div class="t">⚠ This looks like a BP that is already in the tracker</div>${hits.map(row).join('')}<div class="foot"><span>Adding a new Lines Annex? Open it and attach the PDF there.</span><button type="button" class="link-btn" data-sim-no>No, it's a different BP</button></div>`;
+    box.hidden = false;
   }
   const myName = () => (state.me.name && !/preview user|unknown|this browser/i.test(state.me.name) ? state.me.name : '');
   function drawNewLines() {
@@ -1011,7 +1092,7 @@
     $('#pdf-remove').hidden = false; $('#pdf-pick').textContent = 'Add another PDF';
     $('#btn-new-submit').disabled = !!p.needsAnswer;
     $('#new-existing').checked = p.bpType === 'existing';
-    drawNewLines(); drawDocPreview();
+    drawNewLines(); drawDocPreview(); checkSimilar();
   }
   async function submitNew(e) {
     e.preventDefault();
@@ -1056,17 +1137,20 @@
   // ---------- Export ----------
   function exportCsv() {
     const head = ['BP name', 'Region', 'Owner', 'Contract stage', 'Docs received', 'Account created on SF', 'Bank details updated', 'Onboarding form filled',
-      'Docs pending', 'Comments', 'Line codes', 'RT Kms', 'MinG', 'RT Amt', 'Total RT Amt', 'Annual mileage (km)', 'Weekly KMs (revenue report)', 'Rejection reason', 'Rejection details', 'Revised sent for signing', 'Last updated'];
+      'Docs pending', 'Comments', 'Line codes', 'RT Kms', 'MinG', 'RT Amt', 'Line effective from', 'Total RT Amt', 'Annual mileage (km)', 'Weekly KMs (revenue report)', 'Rejection reason', 'Rejection details', 'Revised sent for signing', 'Last updated'];
+    // Which "Columns" switch each Excel column belongs to (null = always included)
+    const grp = [null, 'region', null, 'stage', 'onboarding', 'onboarding', 'onboarding', 'onboarding', 'onboarding', 'comments', 'lines', 'lines', 'lines', 'lines', 'lines', 'rtAmt', 'km', 'km', null, null, null, null];
+    const keep = head.map((h, i) => !grp[i] || colOn(grp[i]));
     const yn2 = (b) => (b ? 'Yes' : 'No');
     const list = sorted(state.contracts.filter((c) => matches(c)));
     const rows = list.map((c) => {
       const r = C.latestRejection(c);
       const per = (k) => c.lines.map((l) => `${l.code}:${l[k] ?? ''}`).join(', ');
       return [c.bpName, c.region, c.owner, c.stage, yn2(c.docsReceived), yn2(c.sfAccountCreated), c.bankDetails, yn2(c.onboardingForm),
-        c.docsPending, c.comments, c.lines.map((l) => l.code).join(', '), per('rtKms'), per('minG'), per('rtAmt'), C.totals(c).rtAmt, c.annualMileage ?? '', weekKm(c) ?? '',
+        c.docsPending, c.comments, c.lines.map((l) => l.code).join(', '), per('rtKms'), per('minG'), per('rtAmt'), c.lines.map((l) => `${l.code}:${C.lineFrom(c, l) || ''}`).join(', '), C.totals(c).rtAmt, c.annualMileage ?? '', weekKm(c) ?? '',
         r ? r.category : '', r ? r.reason : '', r ? (r.resentAt ? 'Yes, ' + r.resentAt.slice(0, 10) : 'No') : '', String(c.updatedAt).slice(0, 10)];
     });
-    const csv = [head].concat(rows).map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const csv = [head].concat(rows).map((r) => r.filter((_, i) => keep[i]).map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }));
     a.download = `bp-contracts-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -1080,7 +1164,16 @@
   }
 
   function bind() {
-    buildColumnFilters();
+    buildColumnFilters(); applyColumns();
+    $('#btn-cols').addEventListener('click', (e) => { e.stopPropagation(); openColumns(); });
+    $('#cols-pop').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const pr = e.target.closest('[data-preset]'); if (pr && !pr.disabled) return setColumns(COL_PRESETS[pr.dataset.preset]);
+      const row = e.target.closest('[data-col]'); if (row) return setColumns(colOn(row.dataset.col) ? state.cols.filter((k) => k !== row.dataset.col) : state.cols.concat([row.dataset.col]));
+      if (e.target.closest('#cols-reset')) return setColumns(COL_ALL);
+    });
+    $('#cols-pop').addEventListener('keydown', (e) => { const row = e.target.closest('[data-col]'); if (row && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); row.click(); } if (e.key === 'Escape') $('#cols-pop').hidden = true; });
+    document.addEventListener('click', (e) => { if (!e.target.closest('#cols-pop') && !e.target.closest('#btn-cols')) $('#cols-pop').hidden = true; });
     const cfApply = () => { renderStageFilters(); renderRows(); renderColumnFilterState(); };
     const pop = $('#cf-pop');
     $('#edit-tbl thead').addEventListener('click', (e) => {
@@ -1165,6 +1258,7 @@
     });
     $('#drawer').addEventListener('change', (e) => {
       const el = e.target;
+      if (el.dataset.k === 'from' && el.closest('[data-lines="d"]')) { onLineInput(state.draft.lines, el); updateDirty(); }
       if (el.matches('[data-rcm]')) { state.draft.rcm = el.value || null; renderDrawer(); }
       if (el.matches('[data-bptype]')) { state.draft.bpType = el.checked ? 'existing' : 'new'; renderDrawer(); }
       if (el.dataset.doc) { state.draft.docs = Object.assign({}, state.draft.docs); if (el.value === 'missing') delete state.draft.docs[el.dataset.doc]; else state.draft.docs[el.dataset.doc] = el.value; renderDrawer(); }
@@ -1183,6 +1277,7 @@
     // Add contract dialog
     const dlgNew = $('#dlg-new');
     $('#new-lines').addEventListener('input', (e) => { if (e.target.dataset.k) onLineInput(newLines, e.target); });
+    $('#new-lines').addEventListener('change', (e) => { if (e.target.dataset.k === 'from') onLineInput(newLines, e.target); });
     $('#new-lines').addEventListener('click', (e) => { const d = e.target.closest('[data-del-line]'); if (d) { newLines.splice(Number(d.dataset.delLine), 1); drawNewLines(); } });
     // Enter in the last box of the last line adds a new line
     $('#new-lines').addEventListener('keydown', (e) => {
@@ -1190,6 +1285,13 @@
       e.preventDefault();
       const tr = e.target.closest('tr'); if (tr.nextElementSibling) return;
       newLines.push(blankLine()); drawNewLines(); $$('[data-lines="n"] [data-k="code"]').pop().focus();
+    });
+    let simTimer = null;
+    fld('bpName').addEventListener('input', () => { clearTimeout(simTimer); simTimer = setTimeout(checkSimilar, 150); });
+    $('#bp-similar').addEventListener('click', (e) => {
+      const o = e.target.closest('[data-sim-open]');
+      if (o) { dlgNew.close(); openDrawer(o.dataset.simOpen); return; }
+      if (e.target.closest('[data-sim-no]')) { simDismissed = C.nameKey(fld('bpName').value); checkSimilar(); }
     });
     $('#btn-add-line').addEventListener('click', () => { newLines.push(blankLine()); drawNewLines(); $$('[data-lines="n"] [data-k="code"]').pop().focus(); });
     $('#btn-paste').addEventListener('click', () => {
@@ -1207,7 +1309,7 @@
     att.addEventListener('drop', (e) => attachPdfs(e.dataTransfer.files));
     $('#pdf-banner').addEventListener('click', (e) => {
       const s = e.target.closest('[data-signed]'); if (s && pdf) { pdf.opts.signedAnswer = s.dataset.signed === 'yes'; fillFromPdf(); return; }
-      if (e.target.closest('#pdf-not-same') && pdf) { pdf.opts.forceNew = true; fillFromPdf(); }
+      if (e.target.closest('#pdf-not-same') && pdf) { pdf.opts.forceNew = true; simDismissed = C.nameKey(pdf.r.bpName); fillFromPdf(); }
     });
     // Typing over a field that came from the PDF removes its "from PDF" tag
     $('#form-new').addEventListener('input', (e) => { const n = e.target.name; if (n && $(`[data-tag="${n}"]`)) setTag(n, false); if (n === 'bpName' && pdf && pdf.plan && !pdf.plan.bp) $('#btn-new-submit').textContent = 'Add ' + (e.target.value || 'contract'); });

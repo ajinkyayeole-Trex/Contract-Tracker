@@ -6,7 +6,7 @@
 <title>Flix India – BP Contract Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=20261030a">
+<link rel="stylesheet" href="styles.css?v=20261031a">
 </head>
 <body>
 
@@ -63,6 +63,7 @@
         <button type="button" class="gh-btn" id="btn-clear-cf" hidden>✕ Clear column filters</button>
         <select class="sel" id="f-region" aria-label="Region"><option value="">All regions</option></select>
         <button class="gh-btn" data-export>⬇ Excel</button>
+        <button type="button" class="gh-btn cols-btn" id="btn-cols" aria-haspopup="true">▦ Columns</button>
         <button class="add-btn" id="btn-new" data-edit>＋ Add contract</button>
       </div>
     </div>
@@ -103,7 +104,7 @@
       <button class="gh-btn" id="btn-export-lines">⬇ Excel</button></span></div>
     <p class="log-summary" id="ming-summary"></p>
     <div class="tw" style="max-height: calc(100vh - 250px)"><table class="dt lines-view">
-      <thead><tr><th>BP</th><th class="num">Annual mileage (km)</th><th>Line code</th><th>Route</th><th class="num">RT kms</th><th class="num">MinG (₹/km)</th><th class="num">RT amount (₹)</th><th class="num">Revenue report MinG</th><th class="c">Check</th></tr></thead>
+      <thead><tr><th>BP</th><th class="num">Annual mileage (km)</th><th>Line code</th><th>Route</th><th>Effective from</th><th class="num">RT kms</th><th class="num">MinG (₹/km)</th><th class="num">RT amount (₹)</th><th class="num">Revenue report MinG</th><th class="c">Check</th></tr></thead>
       <tbody id="lines-rows"></tbody></table></div>
     <p class="sn"><span>Line codes, RT kms, MinG and RT amount come from the signed Lines Annex; annual mileage from the Vehicles Annex. “Revenue report MinG” is the rate paid in Finance's weekly Revenue Share Report.</span></p>
   </div>
@@ -147,6 +148,7 @@
       <label><span class="lbl">Contract stage<span class="tag" data-tag="stage" hidden>from PDF</span></span><select class="sel" name="stage"></select><span class="was" data-was="stage" hidden></span></label>
       <label><span class="lbl">Annual mileage (km) – Vehicles Annex<span class="tag" data-tag="annualMileage" hidden>from PDF</span></span><input class="ipt" name="annualMileage" inputmode="numeric" placeholder="e.g. 311563"><span class="was" data-was="annualMileage" hidden></span></label>
     </div>
+    <div id="bp-similar" class="similar" hidden></div>
     <label class="chk"><input type="checkbox" id="new-existing" name="existingBp"> <b>Existing BP?</b> <span>Tick if this BP already works with Flix and is moving to a new route: only the Lines Annex and Vehicles Annex need signing. Leave empty for a new BP (all 6 documents).</span></label>
     <details class="paste">
       <summary>Paste several lines at once</summary>
@@ -273,13 +275,20 @@
   </form>
 </dialog>
 
+<!-- COLUMN PICKER (Contracts table) -->
+<div id="cols-pop" class="cols-pop" hidden role="dialog" aria-label="Choose columns">
+  <div class="seg2" id="cols-presets"></div>
+  <div id="cols-list"></div>
+  <div class="cols-foot"><button type="button" class="link-btn" id="cols-reset">Reset</button><span>Saved on this computer</span></div>
+</div>
+
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="vendor/pdf.min.js"></script>
-<script src="core.js?v=20261030a"></script>
-<script src="pdfparse.js?v=20261030a"></script>
-<script src="secure.js?v=20261030a"></script>
-<script src="ghstore.js?v=20261030a"></script>
-<script src="app.js?v=20261030a"></script>
+<script src="core.js?v=20261031a"></script>
+<script src="pdfparse.js?v=20261031a"></script>
+<script src="secure.js?v=20261031a"></script>
+<script src="ghstore.js?v=20261031a"></script>
+<script src="app.js?v=20261031a"></script>
 </body>
 </html>
