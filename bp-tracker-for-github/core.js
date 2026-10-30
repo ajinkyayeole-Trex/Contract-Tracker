@@ -219,8 +219,15 @@
     return v === '' || v === null || v === undefined ? '(empty)' : String(v);
   }
 
+  // Same content, whatever the order of the keys (the database may store them in a different order)
+  function stableJson(v) {
+    if (v === undefined) return 'null';
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+    return '{' + Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}';
+  }
   function sameValue(a, b) {
-    return JSON.stringify(a) === JSON.stringify(b);
+    return stableJson(a) === stableJson(b);
   }
 
   function createContract(input, user, now) {
@@ -354,7 +361,7 @@
     const f = [];
     const last = latestRejection(c);
     if (c.stage === REJECTED && last && !last.resentAt) f.push({ level: 3, text: 'Rejected, revised contract not sent yet' });
-    if (!c.docsReceived || c.docsPending === 'Not received') f.push({ level: 2, text: 'Documents not received' });
+    if (!c.docsReceived || c.docsPending === 'Not received') f.push({ level: 2, text: 'Onboarding documents not received (set “Docs received” to Yes and “Docs pending” to All received in Contracts)' });
     if (c.bankDetails === 'Finance approval') f.push({ level: 1, text: 'Bank details awaiting finance approval' });
     else if (c.bankDetails !== 'Yes') f.push({ level: 1, text: 'Bank details not updated' });
     const dc = docCheck(c);
@@ -366,13 +373,17 @@
     if (c.pendingContract) f.push({ level: 1, text: 'Revised contract out for signing: ' + ((c.pendingContract.changes || []).length) + ' change(s) apply once signed' });
     if (!c.region) f.push({ level: 2, text: 'Region not set: pick N/W or South' });
     const mc = mingCheck(c);
-    mc.items.filter((i) => i.status === 'mismatch').forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${i.contract.toFixed(2)}/km, revenue report ₹${i.paid.toFixed(2)}/km (${mc.period})` }));
+    const n2 = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? '—' : Number(v).toFixed(2));
+    mc.items.filter((i) => i.status === 'mismatch').forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
     if (!c.lines.length && mc.extra.length) f.push({ level: 2, text: `Revenue report pays ${mc.extra.length} line${mc.extra.length > 1 ? 's' : ''} (${mc.extra.map((x) => x.code).join(', ')}) but no Lines Annex is entered (${mc.period})` });
-    else mc.extra.forEach((x) => f.push({ level: 3, text: `${x.code} is in the revenue report at ₹${x.paid.toFixed(2)}/km but not in the signed Lines Annex (${mc.period})` }));
+    else mc.extra.forEach((x) => f.push({ level: 3, text: `${x.code} is in the revenue report at ₹${n2(x.paid)}/km but not in the signed Lines Annex (${mc.period})` }));
     if (c.lines.length && c.stage === 'Signed' && !c.annualMileage) f.push({ level: 1, text: 'Annual mileage missing: add the signed Vehicles Annex' });
     if (!c.lines.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: c.stage === 'Signed' ? 'Lines missing: add the signed Lines Annex' : 'No lines entered' });
-    else if (c.lines.some((l) => l.rtAmt === null)) f.push({ level: 1, text: 'RT amount missing on some lines' });
-    else if (c.lines.some((l) => !l.code)) f.push({ level: 1, text: 'Line code missing' });
+    else {
+      const gap = (l) => ['code', 'rtKms', 'minG', 'rtAmt'].filter((k) => l[k] === null || l[k] === undefined || l[k] === '').map((k) => ({ code: 'line code', rtKms: 'RT kms', minG: 'MinG', rtAmt: 'RT amount' })[k]);
+      const inc = c.lines.map((l) => ({ l, g: gap(l) })).filter((x) => x.g.length);
+      if (inc.length) f.push({ level: 1, text: 'Line details incomplete: ' + inc.map((x) => (x.l.code || 'a line') + ' (' + x.g.join(', ') + ' missing)').join('; ') });
+    }
     return f.sort((a, b) => b.level - a.level);
   }
 
@@ -391,6 +402,7 @@
       const f = lineFrom(c, l);
       if (end && f && f > end) return { code: l.code, contract: l.minG, paid: paid === undefined ? null : paid, status: 'not-started', from: f };
       if (paid === undefined) return { code: l.code, contract: l.minG, paid: null, status: 'not-in-report' };
+      if (l.minG === null || l.minG === undefined || l.minG === '') return { code: l.code, contract: null, paid, status: 'no-ming' };
       const diff = round2(paid - l.minG);
       return { code: l.code, contract: l.minG, paid, diff, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' };
     });
@@ -399,7 +411,7 @@
     Object.keys(rep.rates).filter((k) => !codes.has(k)).forEach((k) => {
       // A line that was still running in the report's week (replaced since): compare with its old rate
       const old = end && (c.pastLines || []).filter((p) => p.code === k && (!p.to || p.to >= addDays(end, -6))).pop();
-      if (old) { const diff = round2(rep.rates[k] - old.minG); items.push({ code: k, contract: old.minG, paid: rep.rates[k], diff, past: true, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' }); }
+      if (old && old.minG != null) { const diff = round2(rep.rates[k] - old.minG); items.push({ code: k, contract: old.minG, paid: rep.rates[k], diff, past: true, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' }); }
       else extra.push({ code: k, paid: rep.rates[k] });
     });
     const bad = items.some((i) => i.status === 'mismatch') || extra.length;
@@ -627,6 +639,6 @@
   return {
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
-    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, similarBps, nameScore, lineFrom,
+    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom,
   };
 });

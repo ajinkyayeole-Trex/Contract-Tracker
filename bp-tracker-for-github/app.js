@@ -635,6 +635,7 @@
   const CHECK = {
     ok: '<span class="sp sp-s">✓ Matches</span>', mismatch: '<span class="sp sp-r">✕ Mismatch</span>', extra: '<span class="sp sp-r">✕ Not in contract</span>',
     'not-in-report': '<span class="sp" style="color:var(--mt);border-color:var(--br2)">Not in report</span>', 'no-report': '<span class="muted">No report yet</span>', 'no-lines': '<span class="muted">Lines Annex needed</span>', 'paid-no-annex': '<span class="sp sp-p">Paid, Lines Annex needed</span>',
+    'no-ming': '<span class="sp sp-p">MinG missing</span>',
     'not-started': '<span class="sp" style="color:var(--bl);border-color:rgba(56,139,253,.4)">Not started yet</span>',
   };
   function renderLinesTab() {
@@ -836,8 +837,9 @@
 
   function renderAll() {
     state.contracts.forEach(C.withDocDefaults);
-    renderHeader(); renderScope(); renderKpis(); renderRegionCompare(); renderDiscrepancies(); renderLinesTab();
-    renderStageFilters(); renderRows(); renderAttention();
+    // Each part is drawn on its own, so a problem in one never blanks the others
+    [renderHeader, renderScope, renderKpis, renderRegionCompare, renderDiscrepancies, renderLinesTab, renderStageFilters, renderRows, renderAttention]
+      .forEach((fn) => { try { fn(); } catch (e) { console.error('Dashboard: ' + fn.name + ' failed', e); } });
     if (state.openId) renderDrawer();
   }
 
@@ -937,7 +939,7 @@
     ['bpName', 'owner', 'stage', 'comments', 'lines', 'annualMileage', 'bpType', 'docs', 'rcm'].forEach((k) => {
       let v = normalised(k, state.draft[k]);
       if (k === 'annualMileage') v = v === '' || v == null ? null : Number(String(v).replace(/[,\s]/g, '')) || null;
-      if (JSON.stringify(v) !== JSON.stringify(c[k])) out[k] = v;
+      if (!C.sameValue(v, c[k])) out[k] = v;
     });
     return out;
   }
