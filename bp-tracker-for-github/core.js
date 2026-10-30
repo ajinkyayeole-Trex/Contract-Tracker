@@ -278,7 +278,12 @@
     if (changed && changes.lines && patch.contract && !sameValue(c.lines, next.lines)) {
       const newEff = isDate(patch.contract.effectiveFrom) ? patch.contract.effectiveFrom : null;
       next.lines = next.lines.map((l) => (l.from || !newEff ? l : Object.assign({}, l, { from: newEff })));
-      const to = newEff ? addDays(newEff, -1) : now.slice(0, 10);
+      const sb3 = patch.contract.signedBy || {};
+      const newSign = [sb3.surya, sb3.bp].filter(isDate).sort().pop();
+      const oldFrom = lineFrom(c, (c.lines || [])[0]);
+      // Normally the day before the new contract starts; if it "starts" before the old one (back-dated), the day before it was signed
+      const base = newEff && (!oldFrom || newEff > oldFrom) ? newEff : (newSign || now.slice(0, 10));
+      const to = addDays(base, -1);
       const past = lineDiff(c.lines, next.lines).filter((d) => d.from && ['removed', 'replaced-old', 'changed'].includes(d.type))
         .map((d) => Object.assign({}, d.from, { from: lineFrom(c, d.from), to, endedBy: d.type === 'changed' ? 'new rate' : d.by || '' }));
       if (past.length) next.pastLines = (c.pastLines || []).concat(past);
@@ -365,8 +370,6 @@
     const last = latestRejection(c);
     if (c.stage === REJECTED && last && !last.resentAt) f.push({ level: 3, text: 'Rejected, revised contract not sent yet' });
     if (!c.docsReceived || c.docsPending === 'Not received') f.push({ level: 2, text: 'Onboarding documents not received (set “Docs received” to Yes and “Docs pending” to All received in Contracts)' });
-    if (c.bankDetails === 'Finance approval') f.push({ level: 1, text: 'Bank details awaiting finance approval' });
-    else if (c.bankDetails !== 'Yes') f.push({ level: 1, text: 'Bank details not updated' });
     const dc = docCheck(c);
     if (!dc.type) f.push({ level: 1, text: 'Contract documents: tick “Existing BP” (new route, only Lines + Vehicles Annex) or mark it as a new BP (all 6)' });
     else {
@@ -568,10 +571,22 @@
       return plan;
     }
 
-    // Existing BP
-    if (signed && c.contract && c.contract.effectiveFrom && r.effectiveFrom && r.effectiveFrom < c.contract.effectiveFrom && c.stage === 'Signed') {
+    // Existing BP. A contract counts as older only if it starts earlier AND was not signed later than the one in the tracker
+    // (a revised annex can be signed in July with an effective date in May).
+    const signedDate = (con) => { const sb2 = (con && con.signedBy) || {}; return [sb2.surya, sb2.bp].filter(isDate).sort().pop() || null; };
+    const newSigned = [r.signedBy && r.signedBy.surya, r.signedBy && r.signedBy.bp, r.signedOn].filter(isDate).sort().pop() || null;
+    const oldSigned = signedDate(c.contract);
+    // Signing dates decide first; the effective date only when they are missing or the same
+    let isOlder = false;
+    if (c.contract) {
+      if (newSigned && oldSigned && newSigned !== oldSigned) isOlder = newSigned < oldSigned;
+      else isOlder = !!(c.contract.effectiveFrom && r.effectiveFrom && r.effectiveFrom < c.contract.effectiveFrom);
+    }
+    if (signed && isOlder && c.stage === 'Signed') {
       plan.kind = 'none';
-      plan.notes.push(`This contract (effective ${r.effectiveFrom}) is older than the one already in the tracker (effective ${c.contract.effectiveFrom}), so nothing is changed.`);
+      plan.notes.push(newSigned && oldSigned && newSigned !== oldSigned
+        ? `This contract was signed on ${newSigned}, before the one already in the tracker (signed ${oldSigned}), so nothing is changed.`
+        : `This contract (effective ${r.effectiveFrom}) is older than the one already in the tracker (effective ${c.contract.effectiveFrom}), so nothing is changed.`);
       return plan;
     }
     if (c.revenueReport && c.revenueReport.lineKm) { const tmp = { lines, revenueReport: c.revenueReport }; const got = fillFromReport(tmp); if (got.length) { lines.splice(0, lines.length, ...tmp.lines); plan.filledFromReport = got; } }
@@ -600,7 +615,7 @@
     if (mileage) patch.annualMileage = mileage.to;
     // Contract stage. A DocuSign PDF (with its envelope stamp) shows exactly who has signed, so the tracker follows it,
     // even if that means going back (e.g. marked "Signed" but Surya hasn't signed yet). An unsigned copy never moves a stage back.
-    const trustPdf = stamped && !(c.contract && c.contract.effectiveFrom && r.effectiveFrom && r.effectiveFrom < c.contract.effectiveFrom);
+    const trustPdf = stamped && !isOlder;
     const why = sb.source ? ` (DocuSign: BP ${sb.bp ? 'signed' : 'not signed yet'}, Surya ${sb.surya ? 'signed' : 'not signed yet'})` : '';
     if (c.stage === REJECTED && !signed) { patch.stage = flowStage; text.push(`Stage: Rejected → ${flowStage} (revised contract sent)`); }
     else if (signed && c.stage !== 'Signed') { patch.stage = 'Signed'; text.push(`Stage: ${c.stage} → Signed${why}`); }

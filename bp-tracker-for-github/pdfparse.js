@@ -131,7 +131,8 @@
     // Older Lines Annex layout: "Round Trip Amount- 75900 Round trip KM - 1384" + "For Line IN2310B with vehicles …: 54.84 INR"
     Object.keys(routes).filter((c) => !seen[c]).forEach((code) => {
       const at = text.search(new RegExp('Line No\\.\\s*' + code + '\\b', 'i'));
-      const seg = text.slice(at, at + 900).split(/\s+Line No\.\s*IN/i)[0];
+      // Up to the next line's section ("2.2 Line No. …"), not the "Line No. … is part of the Line Bundle" mention inside this one
+      const seg = text.slice(at, at + 1500).split(/\s\d+\.\d+\s+Line No\.\s*IN|\bArt\.\s*\d+\s/i)[0];
       const amt = toNum((/Round Trip Amount\s*[-:]?\s*([\d,]+(?:\.\d+)?)/i.exec(seg) || [])[1]);
       const kms = toNum((/Round\s*trip\s*K(?:M|ms)\s*[-:]?\s*([\d,]+(?:\.\d+)?)/i.exec(seg) || [])[1]);
       let rate = toNum((new RegExp('For Line ' + code + '\\s+with vehicles[^:]{0,200}:\\s*([\\d.,]+)\\s*INR(?!\\s*per\\s*Round)', 'i').exec(text) || [])[1]);
@@ -168,9 +169,10 @@
     // 2) No certificate: the signing dates DocuSign stamps on each signature page, right after "Docusign Envelope ID: …"
     //    (one date = only the BP has signed, two dates = BP and Surya).
     if (!sg.length && r.envelopeId) {
-      const re = /Docusign Envelope ID:?\s*[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}((?:\s+\d{2}\.\d{2}\.\d{4}){1,2})(?!\.?\d)/gi;
+      // Each date may carry a time: "23.07.2026 | 08:14 CEST 23.07.2026 | 10:32 CEST"
+      const re = /Docusign Envelope ID:?\s*[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}((?:\s+\d{2}\.\d{2}\.\d{4}(?:\s*\|\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:[AP]M))?(?:\s*[A-Z]{2,5})?)?){1,2})(?![.\d])/gi;
       const pages = []; let mm;
-      while ((mm = re.exec(text))) pages.push(mm[1].trim().split(/\s+/).map((d) => d.split('.').reverse().join('-')));
+      while ((mm = re.exec(text))) pages.push((mm[1].match(/\d{2}\.\d{2}\.\d{4}/g) || []).map((d) => d.split('.').reverse().join('-')));
       // A signature page with no date at all: the stamp is followed by text, so it isn't matched; count those too
       const sigPages = (text.match(/\(Signature\)\s*\(Signature\)/gi) || []).length;
       if (pages.length) {
