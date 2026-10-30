@@ -67,6 +67,8 @@
   const BP_TYPES = { new: 'New BP (all 6 documents)', existing: 'Existing BP, new route (Lines + Vehicles Annex)' };
 
   const STALE_DAYS = 7;
+  // MinG differences up to this (₹/km, either way) are not raised in Needs attention
+  const MING_TOLERANCE = 0.08;
 
   const round2 = (n) => Math.round(n * 100) / 100;
   const num = (v) => {
@@ -358,7 +360,8 @@
       type: c.bpType || null, rows,
       missing: need.filter((r) => r.status === 'missing'),
       notSigned: need.filter((r) => r.status !== 'signed' && r.status !== 'missing'),
-      done: need.filter((r) => r.status === 'signed').length, total: need.length,
+      // Every attached document counts, signed or not; only a document that was never attached is missing
+      done: need.filter((r) => r.status !== 'missing').length, signed: need.filter((r) => r.status === 'signed').length, total: need.length,
     };
   }
 
@@ -374,13 +377,13 @@
     if (!dc.type) f.push({ level: 1, text: 'Contract documents: tick “Existing BP” (new route, only Lines + Vehicles Annex) or mark it as a new BP (all 6)' });
     else {
       if (dc.missing.length) f.push({ level: 2, text: 'Missing contract documents: ' + dc.missing.map((r) => r.label).join(', ') });
-      if (dc.notSigned.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: 'Not signed yet: ' + dc.notSigned.map((r) => r.label + ' (' + String(DOC_STATUS[r.status] || r.status).toLowerCase() + ')').join(', ') });
     }
     if (c.pendingContract) f.push({ level: 1, text: 'Revised contract out for signing: ' + ((c.pendingContract.changes || []).length) + ' change(s) apply once signed' });
     if (!c.region) f.push({ level: 2, text: 'Region not set: pick N/W or South' });
     const mc = mingCheck(c);
     const n2 = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? '—' : Number(v).toFixed(2));
-    mc.items.filter((i) => i.status === 'mismatch').forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
+    // Small differences (₹0.08/km or less) are only highlighted in the Lines & MinG tab, not raised here
+    mc.items.filter((i) => i.status === 'mismatch' && !(Math.abs(Number(i.diff)) <= MING_TOLERANCE + 1e-9)).forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
     if (!c.lines.length && mc.extra.length) f.push({ level: 2, text: `Revenue report pays ${mc.extra.length} line${mc.extra.length > 1 ? 's' : ''} (${mc.extra.map((x) => x.code).join(', ')}) but no Lines Annex is entered (${mc.period})` });
     else mc.extra.forEach((x) => f.push({ level: 3, text: `${x.code} is in the revenue report at ₹${n2(x.paid)}/km but not in the signed Lines Annex (${mc.period})` }));
     if (c.lines.length && c.stage === 'Signed' && !c.annualMileage) f.push({ level: 1, text: 'Annual mileage missing: add the signed Vehicles Annex' });
@@ -701,7 +704,7 @@
   }
 
   return {
-    STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS,
+    STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS, MING_TOLERANCE,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
     latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport, sameBp,
   };

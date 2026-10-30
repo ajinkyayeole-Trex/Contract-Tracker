@@ -342,9 +342,9 @@
     { k: 'bpName', text: 'Search name', get: (c) => c.bpName + ' ' + (c.aliases || []).join(' ') + ' ' + (c.owner || '') },
     { k: 'region', opts: () => ['N/W', 'South', 'Not set'], get: (c) => c.region || 'Not set' },
     { k: 'stage', opts: () => C.ALL_STAGES, get: (c) => c.stage },
-    { k: 'docs', opts: () => ['All signed', 'Missing documents', 'Not signed yet', 'New BP', 'Existing BP', 'Not decided'], test: (c, v) => {
+    { k: 'docs', opts: () => ['All attached', 'Missing documents', 'Not signed yet', 'New BP', 'Existing BP', 'Not decided'], test: (c, v) => {
       const d = C.docCheck(c);
-      if (v === 'All signed') return d.type && d.done === d.total;
+      if (v === 'All attached') return d.type && d.done === d.total;
       if (v === 'Missing documents') return d.type && d.missing.length > 0;
       if (v === 'Not signed yet') return d.type && d.notSigned.length > 0;
       if (v === 'New BP') return d.type === 'new';
@@ -818,7 +818,8 @@
       catch (e) { console.error('Needs attention: could not check ' + c.bpName, e); items.push({ c, f: { level: 2, text: 'Could not check this BP automatically: open it and check its lines and documents' } }); }
     });
     items.sort((a, b) => b.f.level - a.f.level || String(a.c.bpName || '').localeCompare(String(b.c.bpName || '')));
-    $('#attn-count').textContent = items.filter((x) => x.f.level >= 2).length;
+    // The number on the tab = the number of items in the list, so it goes down with every item resolved
+    $('#attn-count').textContent = items.length;
     $('#attention').innerHTML = items.length
       ? items.map(({ c, f }) => `<li><button class="l${f.level}" data-open="${esc(c.id)}"><b>${esc(c.bpName)}</b><span>${esc(f.text)}</span></button></li>`).join('')
       : '<li class="empty">Nothing is blocked. Every contract is moving.</li>';
@@ -851,11 +852,12 @@
   const DOC_ICON = { signed: '✓', surya: '◐', sent: '⏳', pending: '⏳', copy: '⚠', missing: '✗' };
   function docList(c, editable) {
     const dc = C.docCheck(c);
-    const opts = ['missing', 'copy', 'pending', 'signed'];
+    const opts = ['missing', 'copy', 'sent', 'surya', 'signed'];
     return `<ul class="doclist">${dc.rows.map((r) => {
-      const cls = !dc.type ? 'unk' : !r.required ? 'nn' : r.status === 'signed' ? 'ok' : r.status === 'missing' ? 'bad' : 'warn';
+      const cls = !dc.type ? 'unk' : !r.required ? 'nn' : r.status === 'missing' ? 'bad' : 'ok';
+      const list = opts.includes(r.status) ? opts : opts.concat([r.status]);
       const right = editable
-        ? `<select class="sel sm" data-doc="${r.key}">${opts.map((o) => `<option value="${o}"${o === r.status ? ' selected' : ''}>${esc(C.DOC_STATUS[o])}</option>`).join('')}</select>`
+        ? `<select class="sel sm" data-doc="${r.key}">${list.map((o) => `<option value="${o}"${o === r.status ? ' selected' : ''}>${esc(C.DOC_STATUS[o] || o)}</option>`).join('')}</select>`
         : `<span>${esc(C.DOC_STATUS[r.status])}</span>`;
       return `<li class="${cls}"><b>${dc.type && !r.required && r.status === 'missing' ? '–' : DOC_ICON[r.status]}</b><span class="dl">${esc(r.label)}${dc.type && !r.required ? ' <i>not needed (existing BP)</i>' : ''}</span>${right}</li>`;
     }).join('')}</ul>`;
@@ -869,8 +871,8 @@
     const dc = C.docCheck(c);
     if (!dc.type) return '<span class="dbadge unk" title="Tick “Existing BP” or mark as new BP">?</span>';
     const ok = dc.done === dc.total;
-    const tip = ok ? 'All required documents signed' : [].concat(dc.missing.map((r) => 'Missing: ' + r.label), dc.notSigned.map((r) => 'Not signed: ' + r.label)).join('\n');
-    return `<span class="dbadge ${ok ? 'ok' : dc.missing.length ? 'bad' : 'warn'}" title="${esc(tip)}">${dc.done}/${dc.total}</span>`;
+    const tip = ok ? 'All required documents attached' + (dc.signed < dc.total ? ` (${dc.signed} of ${dc.total} signed)` : '') : dc.missing.map((r) => 'Never attached: ' + r.label).join('\n');
+    return `<span class="dbadge ${ok ? 'ok' : 'bad'}" title="${esc(tip)}">${dc.done}/${dc.total}</span>`;
   }
 
   // ---------- Lines editor (used in drawer and in Add contract) ----------
