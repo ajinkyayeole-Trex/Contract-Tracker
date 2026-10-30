@@ -210,11 +210,12 @@
   }
 
   // Combine several PDFs (e.g. Lines Annex + Vehicles Annex uploaded separately)
-  function merge(results, keyFn) {
-    const key = keyFn || ((n) => String(n || '').toLowerCase().replace(/[^a-z0-9]/g, ''));
-    // Only combine PDFs for the same BP; anything for another BP is left out
+  function merge(results, keyFn, sameFn) {
+    const key = keyFn || ((n) => String(n || '').toLowerCase().replace(/['’`´]\s*s\b/g, '').replace(/[^a-z0-9]/g, ''));
+    const same = sameFn || ((a, b) => key(a) === key(b));
+    // Only combine PDFs for the same BP (the name may be written a little differently in each PDF); anything for another BP is left out
     const main = (results.find((r) => r.bpName) || {}).bpName;
-    const skipped = main ? results.filter((r) => r.bpName && key(r.bpName) !== key(main)) : [];
+    const skipped = main ? results.filter((r) => r.bpName && !same(r.bpName, main)) : [];
     results = results.filter((r) => !skipped.includes(r));
     const out = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], docMap: {}, warnings: [], files: [] };
     const order = ['Merchant signature pending', 'Surya signature pending', 'Signed'];

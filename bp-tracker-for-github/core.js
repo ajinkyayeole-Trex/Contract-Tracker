@@ -67,6 +67,8 @@
   const BP_TYPES = { new: 'New BP (all 6 documents)', existing: 'Existing BP, new route (Lines + Vehicles Annex)' };
 
   const STALE_DAYS = 7;
+  // MinG differences up to this (₹/km, either way) are not raised in Needs attention
+  const MING_TOLERANCE = 0.08;
 
   const round2 = (n) => Math.round(n * 100) / 100;
   const num = (v) => {
@@ -108,7 +110,7 @@
 
   // Same BP written differently ("Tegra" / "TEGRA EXPRESS", "Deltin Travels Private Limited")
   const NAME_NOISE = /\b(pvt|private|ltd|limited|co|company|travels?|tours?|logistics|express|mobility|solutions?|services|partners|house|holidays|and|the)\b|[^a-z0-9]/g;
-  function nameKey(n) { return String(n || '').toLowerCase().replace(/&/g, ' ').replace(NAME_NOISE, ''); }
+  function nameKey(n) { return String(n || '').toLowerCase().replace(/['’`´]\s*s\b/g, '').replace(/['’`´]/g, '').replace(/&/g, ' ').replace(NAME_NOISE, ''); }
   function findDuplicate(list, name, exceptId) {
     const k = nameKey(name);
     if (!k) return null;
@@ -358,7 +360,8 @@
       type: c.bpType || null, rows,
       missing: need.filter((r) => r.status === 'missing'),
       notSigned: need.filter((r) => r.status !== 'signed' && r.status !== 'missing'),
-      done: need.filter((r) => r.status === 'signed').length, total: need.length,
+      // Every attached document counts, signed or not; only a document that was never attached is missing
+      done: need.filter((r) => r.status !== 'missing').length, signed: need.filter((r) => r.status === 'signed').length, total: need.length,
     };
   }
 
@@ -374,15 +377,17 @@
     if (!dc.type) f.push({ level: 1, text: 'Contract documents: tick “Existing BP” (new route, only Lines + Vehicles Annex) or mark it as a new BP (all 6)' });
     else {
       if (dc.missing.length) f.push({ level: 2, text: 'Missing contract documents: ' + dc.missing.map((r) => r.label).join(', ') });
-      if (dc.notSigned.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: 'Not signed yet: ' + dc.notSigned.map((r) => r.label + ' (' + String(DOC_STATUS[r.status] || r.status).toLowerCase() + ')').join(', ') });
     }
     if (c.pendingContract) f.push({ level: 1, text: 'Revised contract out for signing: ' + ((c.pendingContract.changes || []).length) + ' change(s) apply once signed' });
     if (!c.region) f.push({ level: 2, text: 'Region not set: pick N/W or South' });
     const mc = mingCheck(c);
     const n2 = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? '—' : Number(v).toFixed(2));
-    mc.items.filter((i) => i.status === 'mismatch').forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
+    // Small differences (₹0.08/km or less) are only highlighted in the Lines & MinG tab, not raised here
+    mc.items.filter((i) => i.status === 'mismatch' && !(Math.abs(Number(i.diff)) <= MING_TOLERANCE + 1e-9)).forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
     if (!c.lines.length && mc.extra.length) f.push({ level: 2, text: `Revenue report pays ${mc.extra.length} line${mc.extra.length > 1 ? 's' : ''} (${mc.extra.map((x) => x.code).join(', ')}) but no Lines Annex is entered (${mc.period})` });
-    else mc.extra.forEach((x) => f.push({ level: 3, text: `${x.code} is in the revenue report at ₹${n2(x.paid)}/km but not in the signed Lines Annex (${mc.period})` }));
+    else mc.extra.forEach((x) => f.push({ level: 3, text: x.oldLine
+      ? `Finance still pays the old line code ${x.code} (₹${n2(x.paid)}/km)${x.replacedBy ? ', replaced by ' + x.replacedBy : ''}${x.endedOn ? ' from ' + addDays(x.endedOn, 1) : ''}: ask Finance to switch to the new code (${mc.period})`
+      : `${x.code} is in the revenue report at ₹${n2(x.paid)}/km but not in the signed Lines Annex (${mc.period})` }));
     if (c.lines.length && c.stage === 'Signed' && !c.annualMileage) f.push({ level: 1, text: 'Annual mileage missing: add the signed Vehicles Annex' });
     if (!c.lines.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: c.stage === 'Signed' ? 'Lines missing: add the signed Lines Annex' : 'No lines entered' });
     else {
@@ -403,12 +408,17 @@
     if (l && isDate(l.from)) return l.from;
     return c && c.contract && isDate(c.contract.effectiveFrom) ? c.contract.effectiveFrom : null;
   }
+  // The same line written two ways: "IN04301A" in a contract and "IN4301A" in Finance's report
+  const lineKey = (code) => String(code || '').toUpperCase().replace(/\s+/g, '').replace(/^IN0(\d{4}[A-Z]?)$/, 'IN$1');
   function mingCheck(c) {
-    const rep = c.revenueReport;
-    if (!rep || !rep.rates) return { status: 'no-report', items: [], extra: [] };
+    const rep0 = c.revenueReport;
+    if (!rep0 || !rep0.rates) return { status: 'no-report', items: [], extra: [] };
+    // Look up paid rates by the normalised line code, keeping the code as Finance wrote it
+    const paidBy = {}; Object.keys(rep0.rates).forEach((k) => { paidBy[lineKey(k)] = { code: k, rate: rep0.rates[k] }; });
+    const rep = rep0;
     const end = isDate(rep.periodEnd) ? rep.periodEnd : isDate(rep.receivedOn) ? rep.receivedOn : null;
     const items = c.lines.filter((l) => l.code).map((l) => {
-      const paid = rep.rates[l.code];
+      const paid = paidBy[lineKey(l.code)] ? paidBy[lineKey(l.code)].rate : undefined;
       const f = lineFrom(c, l);
       if (end && f && f > end) return { code: l.code, contract: l.minG, paid: paid === undefined ? null : paid, status: 'not-started', from: f };
       if (paid === undefined) return { code: l.code, contract: l.minG, paid: null, status: 'not-in-report' };
@@ -416,13 +426,16 @@
       const diff = round2(paid - l.minG);
       return { code: l.code, contract: l.minG, paid, diff, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' };
     });
-    const codes = new Set(c.lines.map((l) => l.code));
+    const codes = new Set(c.lines.map((l) => lineKey(l.code)));
     const extra = [];
-    Object.keys(rep.rates).filter((k) => !codes.has(k)).forEach((k) => {
+    Object.keys(rep0.rates).filter((k) => !codes.has(lineKey(k))).forEach((k) => {
+      const paidK = rep0.rates[k];
       // A line that was still running in the report's week (replaced since): compare with its old rate
-      const old = end && (c.pastLines || []).filter((p) => p.code === k && (!p.to || p.to >= addDays(end, -6))).pop();
-      if (old && old.minG != null) { const diff = round2(rep.rates[k] - old.minG); items.push({ code: k, contract: old.minG, paid: rep.rates[k], diff, past: true, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' }); }
-      else extra.push({ code: k, paid: rep.rates[k] });
+      const old = end && (c.pastLines || []).filter((p) => lineKey(p.code) === lineKey(k) && (!p.to || p.to >= addDays(end, -6))).pop();
+      if (old && old.minG != null) { const diff = round2(paidK - old.minG); items.push({ code: k, contract: old.minG, paid: paidK, diff, past: true, status: Math.abs(diff) < 0.005 ? 'ok' : 'mismatch' }); return; }
+      // Paid under a code that was replaced earlier: say so, with the line that replaced it
+      const was = (c.pastLines || []).filter((p) => lineKey(p.code) === lineKey(k)).pop();
+      extra.push(was ? { code: k, paid: paidK, oldLine: true, replacedBy: was.endedBy && was.endedBy !== 'new rate' ? was.endedBy : '', endedOn: was.to || '' } : { code: k, paid: paidK });
     });
     const bad = items.some((i) => i.status === 'mismatch') || extra.length;
     return { status: bad ? 'mismatch' : 'ok', period: rep.period, items, extra };
@@ -432,11 +445,12 @@
   // (revenueReport.lineKm = { LINE: round-trip km }, worked out as the week's Total KMs ÷ (Total Trips ÷ 2)).
   // Then the missing RT amount (or MinG) is worked out from the other two. Returns the codes that were filled.
   function fillFromReport(c) {
-    const rep = c && c.revenueReport; const km = rep && rep.lineKm;
-    if (!km || !Array.isArray(c.lines)) return [];
+    const rep = c && c.revenueReport; const km0 = rep && rep.lineKm;
+    if (!km0 || !Array.isArray(c.lines)) return [];
+    const km = {}; Object.keys(km0).forEach((k) => { km[lineKey(k)] = km0[k]; });
     const filled = [];
     c.lines = c.lines.map((l) => {
-      const v = Number(km[l.code]);
+      const v = Number(km[lineKey(l.code)]);
       if (!l.code || !(v > 0) || (l.rtKms !== null && l.rtKms !== undefined && l.rtKms !== '')) return l;
       const missing = ['rtAmt', 'minG'].filter((k) => l[k] === null || l[k] === undefined || l[k] === '');
       const next = normaliseLine(Object.assign({}, l, { rtKms: v, calc: missing.length === 1 ? missing[0] : null, printed: false }));
@@ -462,14 +476,30 @@
     if (exact) return { c: exact, how: 'name' };
     const k = nameKey(name);
     if (k.length < 3) return null;
-    const first = (n) => (String(n || '').toLowerCase().match(/[a-z0-9]+/) || [''])[0];
-    const near = list.find((c) => !c.archived && [c.bpName].concat(c.aliases || []).some((a) => {
+    const first = (n) => (String(n || '').toLowerCase().replace(/['’`´]\s*s\b/g, '').match(/[a-z0-9]+/) || [''])[0];
+    const fits = (a) => {
       const x = nameKey(a);
       if (x.length >= 5 && k.length >= 5 && (x.startsWith(k) || k.startsWith(x))) return true;
       // Short names like "UBS": the same first word, and one name is the start of the other
       return first(a).length >= 3 && first(a) === first(name) && x && k && (x.startsWith(k) || k.startsWith(x));
-    }));
-    return near ? { c: near, how: 'similar' } : null;
+    };
+    // Several BPs may fit (e.g. "Asian Shina…" and "Asian Travels"): take the one whose name is closest
+    const cands = list.filter((c) => !c.archived && [c.bpName].concat(c.aliases || []).some(fits))
+      .map((c) => ({ c, score: Math.max(...[c.bpName].concat(c.aliases || []).map((a) => nameScore(name, a))) }))
+      .sort((a, b) => b.score - a.score);
+    const sim = similarBps(list, name)[0];
+    const near = cands.length ? (sim && sim.score > cands[0].score ? sim.c : cands[0].c) : null;
+    if (near) return { c: near, how: 'similar' };
+    const best = similarBps(list, name)[0];
+    return best && best.score >= 0.9 ? { c: best.c, how: 'similar' } : null;
+  }
+  // Two PDFs belong to the same BP (used when several PDFs are attached together)
+  function sameBp(a, b) {
+    if (!a || !b) return true;
+    const ka = nameKey(a), kb = nameKey(b);
+    if (ka && ka === kb) return true;
+    if (ka.length >= 5 && kb.length >= 5 && (ka.startsWith(kb) || kb.startsWith(ka))) return true;
+    return nameScore(a, b) >= 0.9;
   }
 
   // What changed between the lines in the tracker and the lines in a new Lines Annex
@@ -685,8 +715,8 @@
   }
 
   return {
-    STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS,
+    STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS, MING_TOLERANCE,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
-    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport,
+    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport, sameBp, lineKey,
   };
 });
