@@ -408,7 +408,7 @@
   function closePop() { const pop = $('#cf-pop'); if (pop) { pop.hidden = true; pop.style.display = 'none'; } cfOpen = null; }
   function renderColumnFilterState() {
     const n = Object.values(state.cf).filter(Boolean).length;
-    const b = $('#btn-clear-cf'); if (b) { b.hidden = !n; b.textContent = `✕ Clear ${n} filter${n === 1 ? '' : 's'}`; }
+    const b = $('#btn-clear-cf'); if (b) { b.hidden = !n; b.textContent = `✕ Clear ${n} column filter${n === 1 ? '' : 's'}`; b.title = activeFilters().join('\n'); }
     $$('#edit-tbl .cfb').forEach((el) => {
       const on = !!state.cf[el.dataset.cfb]; el.classList.toggle('on', on);
       el.style.color = on ? '#73d700' : '#8b949e'; el.style.background = on ? 'rgba(115,215,0,.15)' : 'transparent'; el.style.borderColor = on ? 'rgba(115,215,0,.6)' : 'transparent';
@@ -651,8 +651,8 @@
         ${first ? `<td rowspan="${span}" class="bp-cell"><button class="bp-link" data-open="${esc(r.c.id)}">${esc(r.c.bpName)}</button><span class="sub">${esc(r.c.region || '')}, ${esc(r.c.stage)}</span></td>
           <td rowspan="${span}" class="num bp-cell">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">Vehicles Annex needed</span>'}</td>` : ''}
         <td class="mono">${l ? esc(l.code) : '—'}${r.past ? '<span class="sub">old line, ended ' + dShort(l.to) + '</span>' : ''}</td><td class="wrap">${l ? esc(l.route || '') : ''}</td>
-        <td>${l && r.past ? dShort(l.from) : l && C.lineFrom(r.c, l) ? dShort(C.lineFrom(r.c, l)) + (daysUntil(C.lineFrom(r.c, l)) > 0 ? '<span class="sub future">starts in ' + daysUntil(C.lineFrom(r.c, l)) + ' days</span>' : '') : '<span class="muted">—</span>'}</td>
-        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) + (l.kmsFrom ? '<span class="sub">from revenue report</span>' : '') : '<span class="muted">waiting for revenue report</span>'}</td>
+        <td>${(r.status === 'extra' || r.status === 'paid-no-annex') ? '<span class="muted">—</span>' : l && r.past ? dShort(l.from) : l && C.lineFrom(r.c, l) ? dShort(C.lineFrom(r.c, l)) + (daysUntil(C.lineFrom(r.c, l)) > 0 ? '<span class="sub future">starts in ' + daysUntil(C.lineFrom(r.c, l)) + ' days</span>' : '') : '<span class="muted">—</span>'}</td>
+        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) + (l.kmsFrom ? '<span class="sub">from revenue report</span>' : '') : (r.status === 'extra' || r.status === 'paid-no-annex') ? '<span class="muted">not in contract</span>' : '<span class="muted">waiting for revenue report</span>'}</td>
         <td class="num">${l && l.minG != null ? l.minG.toFixed(2) : '—'}</td>
         <td class="num">${l && l.rtAmt != null ? fmt(l.rtAmt) : '—'}</td>
         <td class="num ${diff ? 'days-hot' : ''}">${r.paid != null ? r.paid.toFixed(2) + (diff ? ` <small>(${diff > 0 ? '+' : ''}${diff.toFixed(2)})</small>` : '') : '—'}</td>
@@ -770,6 +770,27 @@
     return sel(c, 'stage', C.ALL_STAGES, cls);
   }
 
+  // Every filter that is switched on, in words (search, stage, group, region, needs attention, column funnels)
+  function activeFilters() {
+    const out = []; const f = state.f;
+    if (f.q) out.push(`search “${f.q}”`);
+    if (f.stage) out.push(`stage “${f.stage}”`);
+    if (f.group && GROUPS[f.group]) out.push(GROUPS[f.group].label);
+    if (f.region) out.push(`region ${f.region}`);
+    if (state.scope) out.push(`${state.scope} only (top right)`);
+    if (f.attn) out.push('needs attention only');
+    Object.keys(state.cf || {}).filter((k) => state.cf[k]).forEach((k) => {
+      const th = $$('#edit-tbl thead th')[COLF.findIndex((x) => x.k === k)];
+      out.push(`column filter ${th ? '“' + th.innerText.split('\n')[0].trim() + '”' : k}: ${String(state.cf[k]).replace(/^__mismatch$/, 'MinG mismatch').replace(/^__none$/, 'No lines')}`);
+    });
+    return out;
+  }
+  function clearAllFilters() {
+    state.f = { q: '', region: '', stage: '', group: '', attn: false }; state.cf = {};
+    const q = $('#q'); if (q) q.value = ''; const r = $('#f-region'); if (r) r.value = '';
+    if (state.scope) setScope('');
+    renderStageFilters(); renderRows(); renderColumnFilterState();
+  }
   function renderRows() {
     const list = sorted(state.contracts.filter((c) => matches(c)));
     const ro = !state.me.canEdit;
@@ -792,7 +813,7 @@
         <td class="num" title="${esc(c.revenueReport && c.revenueReport.period ? 'Revenue Share Report ' + c.revenueReport.period : '')}">${weekKm(c) ? fmt(weekKm(c), 2) : '<span class="muted">—</span>'}</td>
         <td><input class="ipt ipt-note" data-note="${esc(c.id)}" value="${esc(c.comments)}" ${ro ? 'disabled' : ''} placeholder="Add a note…"></td>
       </tr>`;
-    }).join('') || `<tr><td colspan="15" class="empty" style="padding:18px">${state.contracts.length ? 'No BPs match these filters. Clear the search or pick another stage.' : 'No contracts yet. Click “＋ Add contract” to add the first one from Salesforce.'}</td></tr>`;
+    }).join('') || `<tr><td colspan="15" class="empty" style="padding:18px">${state.contracts.length ? `No BPs match. Filters switched on: <b>${esc(activeFilters().join(' · ') || 'none')}</b>. <button type="button" class="link-btn" data-clear-all>✕ Clear all filters</button>` : 'No contracts yet. Click “＋ Add contract” to add the first one from Salesforce.'}</td></tr>`;
     $('#row-count').textContent = `${list.length} of ${inScope().length} BPs${state.scope ? ' in ' + regionName(state.scope) : ''}`;
     $$('#edit-tbl th[data-sort]').forEach((th) => {
       const on = th.dataset.sort === state.sort.key;
@@ -1292,6 +1313,7 @@
 
 
     document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-clear-all]')) { clearAllFilters(); return; }
       if (e.target.closest('[data-goto-disc], #btn-disc-all')) { state.lf.bad = !!e.target.closest('[data-goto-disc]'); state.lf.q = ''; $('#lq').value = ''; showTab('lines'); renderLinesTab(); return; }
       const go = e.target.closest('[data-goto-stage]');
       if (go) { state.f.stage = go.dataset.gotoStage; state.f.group = ''; state.f.region = ''; state.f.attn = false; showTab('edit'); renderStageFilters(); renderRows(); return; }
@@ -1420,6 +1442,18 @@
   }
 
   // Refresh every minute so leadership always sees the latest.
+  // Is a newer version of the dashboard on GitHub than the one open in this browser? Then say so (one click to reload).
+  const MY_VERSION = ((document.querySelector('script[src*="app.js"]') || {}).src || '').split('v=')[1] || '';
+  async function checkVersion() {
+    if (!MY_VERSION || location.protocol === 'file:') return;
+    try {
+      const html = await (await fetch('index.html?t=' + Date.now(), { cache: 'no-store' })).text();
+      const live = (html.match(/app\.js\?v=([\w-]+)/) || [])[1];
+      if (live && live !== MY_VERSION && !$('#update-banner')) {
+        document.body.insertAdjacentHTML('afterbegin', `<div id="update-banner" class="banner" style="background:#1f6feb;color:#fff;text-align:center">A newer version of the dashboard is available. <button type="button" class="link-btn" style="color:#fff;font-weight:700" onclick="location.reload()">Reload now</button></div>`);
+      }
+    } catch (e) { /* offline: try again later */ }
+  }
   async function poll() {
     if (state.mode === 'github') return pollGithub();
     if (state.mode === 'supabase') return pollSupabase();
@@ -1476,7 +1510,10 @@
   }
 
   api.init().then(() => {
-    bind(); renderAll(); setInterval(poll, 60000);
+    bind(); renderAll(); setInterval(poll, 30000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { poll(); checkVersion(); } });
+    window.addEventListener('focus', () => poll());
+    setInterval(checkVersion, 120000); checkVersion();
     $('#preview-banner').addEventListener('click', (e) => {
       if (e.target.closest('#btn-signin')) openSignin();
       if (e.target.closest('#btn-protect')) openProtect();
