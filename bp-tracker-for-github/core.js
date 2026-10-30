@@ -92,6 +92,7 @@
     const empty = NUM_KEYS.filter((k) => out[k] === null);
     // A rate printed in the contract is kept exactly, even if it isn't RT amount ÷ RT kms to the paisa
     if (isDate(l.from)) out.from = l.from;
+    if (l.kmsFrom) out.kmsFrom = String(l.kmsFrom);
     if (l.printed && empty.length === 0) { out.calc = null; out.printed = true; if (l.route) out.route = String(l.route); if (l.source) out.source = String(l.source); return out; }
     if (empty.length === 1) out.calc = empty[0];
     else if (!out.calc && empty.length === 0) out.calc = 'minG';
@@ -106,7 +107,7 @@
   }
 
   // Same BP written differently ("Tegra" / "TEGRA EXPRESS", "Deltin Travels Private Limited")
-  const NAME_NOISE = /\b(pvt|private|ltd|limited|co|company|travels?|tours?|logistics|express|mobility|services|partners|house|holidays|and|the)\b|[^a-z0-9]/g;
+  const NAME_NOISE = /\b(pvt|private|ltd|limited|co|company|travels?|tours?|logistics|express|mobility|solutions?|services|partners|house|holidays|and|the)\b|[^a-z0-9]/g;
   function nameKey(n) { return String(n || '').toLowerCase().replace(/&/g, ' ').replace(NAME_NOISE, ''); }
   function findDuplicate(list, name, exceptId) {
     const k = nameKey(name);
@@ -359,6 +360,8 @@
   // What needs someone's attention, most urgent first.
   function flags(c, now) {
     const f = [];
+    c = Object.assign({ lines: [], docs: {}, history: [], rejections: [] }, c);
+    c.lines = Array.isArray(c.lines) ? c.lines.filter(Boolean) : [];
     const last = latestRejection(c);
     if (c.stage === REJECTED && last && !last.resentAt) f.push({ level: 3, text: 'Rejected, revised contract not sent yet' });
     if (!c.docsReceived || c.docsPending === 'Not received') f.push({ level: 2, text: 'Onboarding documents not received (set “Docs received” to Yes and “Docs pending” to All received in Contracts)' });
@@ -368,7 +371,7 @@
     if (!dc.type) f.push({ level: 1, text: 'Contract documents: tick “Existing BP” (new route, only Lines + Vehicles Annex) or mark it as a new BP (all 6)' });
     else {
       if (dc.missing.length) f.push({ level: 2, text: 'Missing contract documents: ' + dc.missing.map((r) => r.label).join(', ') });
-      if (dc.notSigned.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: 'Not signed yet: ' + dc.notSigned.map((r) => r.label + ' (' + DOC_STATUS[r.status].toLowerCase() + ')').join(', ') });
+      if (dc.notSigned.length) f.push({ level: c.stage === 'Signed' ? 2 : 1, text: 'Not signed yet: ' + dc.notSigned.map((r) => r.label + ' (' + String(DOC_STATUS[r.status] || r.status).toLowerCase() + ')').join(', ') });
     }
     if (c.pendingContract) f.push({ level: 1, text: 'Revised contract out for signing: ' + ((c.pendingContract.changes || []).length) + ' change(s) apply once signed' });
     if (!c.region) f.push({ level: 2, text: 'Region not set: pick N/W or South' });
@@ -382,7 +385,11 @@
     else {
       const gap = (l) => ['code', 'rtKms', 'minG', 'rtAmt'].filter((k) => l[k] === null || l[k] === undefined || l[k] === '').map((k) => ({ code: 'line code', rtKms: 'RT kms', minG: 'MinG', rtAmt: 'RT amount' })[k]);
       const inc = c.lines.map((l) => ({ l, g: gap(l) })).filter((x) => x.g.length);
-      if (inc.length) f.push({ level: 1, text: 'Line details incomplete: ' + inc.map((x) => (x.l.code || 'a line') + ' (' + x.g.join(', ') + ' missing)').join('; ') });
+      // Only RT kms (and so RT amount) missing, MinG known: the weekly revenue report fills it in by itself
+      const waiting = inc.filter((x) => x.l.code && x.l.minG != null && x.g.every((g) => g === 'RT kms' || g === 'RT amount'));
+      const other = inc.filter((x) => !waiting.includes(x));
+      if (waiting.length) f.push({ level: 1, text: 'RT kms blank in the contract for ' + waiting.map((x) => x.l.code).join(', ') + ': filled in automatically from the next Revenue Share Report' });
+      if (other.length) f.push({ level: 1, text: 'Line details incomplete: ' + other.map((x) => (x.l.code || 'a line') + ' (' + x.g.join(', ') + ' missing)').join('; ') });
     }
     return f.sort((a, b) => b.level - a.level);
   }
@@ -418,6 +425,25 @@
     return { status: bad ? 'mismatch' : 'ok', period: rep.period, items, extra };
   }
 
+  // Lines whose contract leaves RT kms blank: take the RT kms from Finance's weekly Revenue Share Report
+  // (revenueReport.lineKm = { LINE: round-trip km }, worked out as the week's Total KMs ÷ (Total Trips ÷ 2)).
+  // Then the missing RT amount (or MinG) is worked out from the other two. Returns the codes that were filled.
+  function fillFromReport(c) {
+    const rep = c && c.revenueReport; const km = rep && rep.lineKm;
+    if (!km || !Array.isArray(c.lines)) return [];
+    const filled = [];
+    c.lines = c.lines.map((l) => {
+      const v = Number(km[l.code]);
+      if (!l.code || !(v > 0) || (l.rtKms !== null && l.rtKms !== undefined && l.rtKms !== '')) return l;
+      const missing = ['rtAmt', 'minG'].filter((k) => l[k] === null || l[k] === undefined || l[k] === '');
+      const next = normaliseLine(Object.assign({}, l, { rtKms: v, calc: missing.length === 1 ? missing[0] : null, printed: false }));
+      next.kmsFrom = 'Revenue Share Report ' + (rep.period || '');
+      filled.push(l.code);
+      return next;
+    });
+    return filled;
+  }
+
   function totals(c) {
     return c.lines.reduce((t, l) => ({
       rtAmt: t.rtAmt + (l.rtAmt || 0),
@@ -432,8 +458,14 @@
     const exact = findDuplicate(list, name);
     if (exact) return { c: exact, how: 'name' };
     const k = nameKey(name);
-    if (k.length < 5) return null;
-    const near = list.find((c) => !c.archived && [c.bpName].concat(c.aliases || []).some((a) => { const x = nameKey(a); return x.length >= 5 && (x.startsWith(k) || k.startsWith(x)); }));
+    if (k.length < 3) return null;
+    const first = (n) => (String(n || '').toLowerCase().match(/[a-z0-9]+/) || [''])[0];
+    const near = list.find((c) => !c.archived && [c.bpName].concat(c.aliases || []).some((a) => {
+      const x = nameKey(a);
+      if (x.length >= 5 && k.length >= 5 && (x.startsWith(k) || k.startsWith(x))) return true;
+      // Short names like "UBS": the same first word, and one name is the start of the other
+      return first(a).length >= 3 && first(a) === first(name) && x && k && (x.startsWith(k) || k.startsWith(x));
+    }));
     return near ? { c: near, how: 'similar' } : null;
   }
 
@@ -498,7 +530,7 @@
     const m = opts.forceNew ? null : matchBp(list, r.bpName);
     const c = m ? m.c : null;
     const lines = (r.lines || []).map((l) => normaliseLine({ code: l.code, route: l.route, rtKms: l.rtKms, minG: l.minG, rtAmt: l.rtAmt, from: r.effectiveFrom || null,
-      calc: l.kmsWorkedOut ? 'rtKms' : null, printed: !l.kmsWorkedOut && l.rtKms != null && l.minG != null && l.rtAmt != null, source: 'pdf' }));
+      calc: l.kmsWorkedOut ? 'rtKms' : l.amtWorkedOut ? 'rtAmt' : null, printed: !l.kmsWorkedOut && !l.amtWorkedOut && l.rtKms != null && l.minG != null && l.rtAmt != null, source: 'pdf' }));
     const stamped = !!r.envelopeId;
     const signed = r.stage === 'Signed' || (!stamped && opts.signedAnswer === true);
     const needsAnswer = !stamped && opts.signedAnswer === undefined;
@@ -542,6 +574,7 @@
       plan.notes.push(`This contract (effective ${r.effectiveFrom}) is older than the one already in the tracker (effective ${c.contract.effectiveFrom}), so nothing is changed.`);
       return plan;
     }
+    if (c.revenueReport && c.revenueReport.lineKm) { const tmp = { lines, revenueReport: c.revenueReport }; const got = fillFromReport(tmp); if (got.length) { lines.splice(0, lines.length, ...tmp.lines); plan.filledFromReport = got; } }
     const diff = lines.length ? lineDiff(c.lines, lines) : [];
     // Lines that didn't change keep the date they started
     lines.forEach((l) => { if (diff.some((d) => d.code === l.code)) return; const o = c.lines.find((x) => x.code === l.code); const f = o && lineFrom(c, o); if (f) l.from = f; else delete l.from; });
@@ -639,6 +672,6 @@
   return {
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
-    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom,
+    latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport,
   };
 });

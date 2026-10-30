@@ -107,6 +107,27 @@
       }
       seen[code] = line; r.lines.push(line);
     }
+    // Same layout, but the RT amount is left blank and/or the text is split by a page break
+    // ("For Line IN4305A: INR per Round Trip (agreed Round Trip Distance: Round Trip Kms: 809.1 … km; Reference Rate: 63.96 INR /km)")
+    const fre = /For\s+Line\s+(IN[0-9A-Z]+)\s*:/gi;
+    while ((m = fre.exec(text))) {
+      const code = m[1].toUpperCase();
+      if (seen[code]) continue;
+      const rest = text.slice(m.index + m[0].length);
+      const next = rest.search(/For\s+Line\s+IN[0-9A-Z]+\s*:|\bb\)\s/i);
+      const seg = next > 0 ? rest.slice(0, next) : rest.slice(0, 1500);
+      if (!/INR\s+per\s+Round\s+Trip/i.test(seg)) continue;
+      const amt = toNum((/^\s*([\d,]+(?:\.\d+)?)\s*INR\s+per\s+Round\s+Trip/i.exec(seg) || [])[1]);
+      const kms = toNum((/Round\s*Trip\s*K(?:ms|m)\s*:?\s*([\d,]+(?:\.\d+)?)/i.exec(seg) || [])[1]);
+      // The rate may be pushed past a page break (signature block in between): take the first "xx.xx INR /km" after "Reference Rate:"
+      const rate = toNum((/Reference\s+Rate\s*:\s*([\d,]+(?:\.\d+)?)\s*INR/i.exec(seg) || /Reference\s+Rate\s*:[\s\S]{0,1500}?(\d{1,3}\.\d{1,2})\s*INR\s*\/\s*km/i.exec(seg) || [])[1]);
+      if (!amt && !kms && !rate) continue;
+      const line = { code, route: routes[code] || '', rtAmt: amt, minG: rate, rtKms: kms };
+      if (!amt && kms && rate) { line.rtAmt = round2(kms * rate); line.amtWorkedOut = true; r.warnings.push(`${code}: the contract leaves the RT amount blank, so ₹${line.rtAmt.toLocaleString('en-IN')} is worked out from ${kms} km × ₹${rate}/km. Please check.`); }
+      else if (!amt && !kms && rate) r.warnings.push(`${code}: the contract only prints the MinG (₹${rate}/km); RT kms and RT amount are left blank. They are filled in automatically from the next Revenue Share Report (or straight away if one is already saved).`);
+      else if (!amt || !kms || !rate) r.warnings.push(`${code}: ${[!kms && 'RT kms', !rate && 'MinG', !amt && 'RT amount'].filter(Boolean).join(' and ')} not found in the contract. Please check against the PDF.`);
+      seen[code] = line; r.lines.push(line);
+    }
     // Older Lines Annex layout: "Round Trip Amount- 75900 Round trip KM - 1384" + "For Line IN2310B with vehicles …: 54.84 INR"
     Object.keys(routes).filter((c) => !seen[c]).forEach((code) => {
       const at = text.search(new RegExp('Line No\\.\\s*' + code + '\\b', 'i'));

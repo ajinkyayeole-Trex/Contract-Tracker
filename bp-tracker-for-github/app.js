@@ -652,7 +652,7 @@
           <td rowspan="${span}" class="num bp-cell">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">Vehicles Annex needed</span>'}</td>` : ''}
         <td class="mono">${l ? esc(l.code) : '—'}${r.past ? '<span class="sub">old line, ended ' + dShort(l.to) + '</span>' : ''}</td><td class="wrap">${l ? esc(l.route || '') : ''}</td>
         <td>${l && r.past ? dShort(l.from) : l && C.lineFrom(r.c, l) ? dShort(C.lineFrom(r.c, l)) + (daysUntil(C.lineFrom(r.c, l)) > 0 ? '<span class="sub future">starts in ' + daysUntil(C.lineFrom(r.c, l)) + ' days</span>' : '') : '<span class="muted">—</span>'}</td>
-        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) : '—'}</td>
+        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) + (l.kmsFrom ? '<span class="sub">from revenue report</span>' : '') : '<span class="muted">waiting for revenue report</span>'}</td>
         <td class="num">${l && l.minG != null ? l.minG.toFixed(2) : '—'}</td>
         <td class="num">${l && l.rtAmt != null ? fmt(l.rtAmt) : '—'}</td>
         <td class="num ${diff ? 'days-hot' : ''}">${r.paid != null ? r.paid.toFixed(2) + (diff ? ` <small>(${diff > 0 ? '+' : ''}${diff.toFixed(2)})</small>` : '') : '—'}</td>
@@ -812,15 +812,19 @@
   // ---------- Needs attention tab ----------
   function renderAttention() {
     const items = [];
-    inScope().forEach((c) => C.flags(c).forEach((f) => items.push({ c, f })));
-    items.sort((a, b) => b.f.level - a.f.level || a.c.bpName.localeCompare(b.c.bpName));
+    // One BP with unexpected data must never hide the others
+    inScope().forEach((c) => {
+      try { C.flags(c).forEach((f) => items.push({ c, f })); }
+      catch (e) { console.error('Needs attention: could not check ' + c.bpName, e); items.push({ c, f: { level: 2, text: 'Could not check this BP automatically: open it and check its lines and documents' } }); }
+    });
+    items.sort((a, b) => b.f.level - a.f.level || String(a.c.bpName || '').localeCompare(String(b.c.bpName || '')));
     $('#attn-count').textContent = items.filter((x) => x.f.level >= 2).length;
     $('#attention').innerHTML = items.length
       ? items.map(({ c, f }) => `<li><button class="l${f.level}" data-open="${esc(c.id)}"><b>${esc(c.bpName)}</b><span>${esc(f.text)}</span></button></li>`).join('')
       : '<li class="empty">Nothing is blocked. Every contract is moving.</li>';
     const rej = inScope().filter((c) => c.stage === C.REJECTED);
     $('#rej-waiting').innerHTML = rej.length
-      ? '<ul class="att">' + rej.map((c) => { const r = C.latestRejection(c); return `<li><button class="l3" data-open="${esc(c.id)}"><b>${esc(c.bpName)}</b><span>${esc(r.category)}, ${C.daysInStage(c) ? C.daysInStage(c) + " days ago" : "today"}</span></button></li>`; }).join('') + '</ul>'
+      ? '<ul class="att">' + rej.map((c) => { const r = C.latestRejection(c) || { category: 'Rejected' }; return `<li><button class="l3" data-open="${esc(c.id)}"><b>${esc(c.bpName)}</b><span>${esc(r.category)}, ${C.daysInStage(c) ? C.daysInStage(c) + " days ago" : "today"}</span></button></li>`; }).join('') + '</ul>'
       : '<p class="empty">No contracts are waiting on a revised version.</p>';
   }
 
