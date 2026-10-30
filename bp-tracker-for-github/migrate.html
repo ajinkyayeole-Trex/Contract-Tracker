@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Move the BP tracker data into Supabase</title>
+<link rel="stylesheet" href="styles.css?v=20261101a">
+<style>
+  body { padding: 40px 20px; }
+  .wrap { max-width: 560px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .step { background: var(--cd); border: 1px solid var(--br2); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .step h2 { font-size: 15px; display: flex; gap: 10px; align-items: center; }
+  .step h2 .n { background: var(--g); color: #000; border-radius: 20px; padding: 0 9px; font-size: 12px; }
+  .step.off { opacity: .45; pointer-events: none; }
+  .step.done h2 .n { background: transparent; color: var(--g); border: 1px solid var(--g); }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+  .ok { color: var(--g); font-size: 12px; } .err { min-height: 0; }
+</style></head>
+<body><div class="wrap">
+  <div class="logo"><div class="lm">FX</div><div><div class="lt">Move the tracker data into Supabase</div><div class="ls">One time only · takes 1 minute</div></div></div>
+
+  <form class="step" id="s1">
+    <h2><span class="n">1</span>Log in to the new database</h2>
+    <p class="hint">Use your own Supabase login (the admin you created in Supabase → Authentication → Users).</p>
+    <label>Work email<input class="ipt" name="email" type="email" autocomplete="email" required></label>
+    <label>Password<input class="ipt" name="pw" type="password" autocomplete="current-password" required></label>
+    <p class="err" id="e1"></p><p class="ok" id="o1"></p>
+    <button class="svb" type="submit">Log in</button>
+  </form>
+
+  <form class="step off" id="s2">
+    <h2><span class="n">2</span>Unlock the current tracker data</h2>
+    <p class="hint">Use the login ID and password of the current dashboard (for example <b>ajinkya</b>). This reads the locked data.json in this folder on your computer only.</p>
+    <label>Current login ID<input class="ipt" name="id" autocomplete="off" required></label>
+    <label>Current password<input class="ipt" name="pw" type="password" autocomplete="off" required></label>
+    <p class="err" id="e2"></p><p class="ok" id="o2"></p>
+    <button class="svb" type="submit">Unlock</button>
+  </form>
+
+  <form class="step off" id="s3">
+    <h2><span class="n">3</span>Copy the BPs into the database</h2>
+    <p class="hint" id="h3">…</p>
+    <p class="err" id="e3"></p><p class="ok" id="o3"></p>
+    <button class="svb" type="submit">Copy into the database</button>
+  </form>
+</div>
+<script src="config.js?v=20261101a"></script>
+<script src="secure.js?v=20261101a"></script>
+<script src="sbstore.js?v=20261101a"></script>
+<script>
+(function () {
+  const $ = (s) => document.querySelector(s);
+  let me = null, list = null, existing = [];
+  const step = (n, on) => $('#s' + n).classList.toggle('off', !on);
+  const done = (n) => $('#s' + n).classList.add('done');
+  if (!SbStore.configured()) $('#e1').textContent = 'config.js is not filled in yet: paste the Supabase Project URL and anon key into it first.';
+
+  $('#s1').addEventListener('submit', async (e) => {
+    e.preventDefault(); $('#e1').textContent = '';
+    try {
+      me = await SbStore.login(e.target.email.value, e.target.pw.value);
+      if (me.role !== 'admin') throw new Error('You are logged in, but only the admin can do this. Your role: ' + me.role);
+      existing = await SbStore.list();
+      $('#o1').textContent = '✓ Logged in as ' + me.name + ' (admin). The database has ' + existing.length + ' BPs now.';
+      done(1); step(2, true);
+    } catch (err) { $('#e1').textContent = err.message; }
+  });
+
+  $('#s2').addEventListener('submit', async (e) => {
+    e.preventDefault(); $('#e2').textContent = '';
+    try {
+      const res = await fetch('data.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error('data.json was not found next to this page. Make sure migrate.html is in the same folder as data.json.');
+      const file = await res.json();
+      let data = file;
+      if (Secure.isProtected(file)) { const key = await Secure.unlock(file, e.target.id.value, e.target.pw.value); data = await Secure.open(file, key); }
+      list = (data.contracts || []).filter((c) => c && c.id && c.bpName);
+      const have = new Set(existing.map((c) => c.id));
+      const todo = list.filter((c) => !have.has(c.id));
+      $('#o2').textContent = '✓ Unlocked: ' + list.length + ' BPs found.';
+      $('#h3').textContent = todo.length ? todo.length + ' BPs will be copied' + (list.length - todo.length ? ' (' + (list.length - todo.length) + ' are already in the database and are left as they are)' : '') + '. Lines, documents, history and revenue report data all come along.' : 'Every BP is already in the database. Nothing to copy.';
+      done(2); step(3, todo.length > 0);
+    } catch (err) { $('#e2').textContent = err.message; }
+  });
+
+  $('#s3').addEventListener('submit', async (e) => {
+    e.preventDefault(); $('#e3').textContent = '';
+    const btn = e.target.querySelector('button'); btn.disabled = true; btn.textContent = 'Copying…';
+    try {
+      const have = new Set((await SbStore.list()).map((c) => c.id));
+      const todo = list.filter((c) => !have.has(c.id));
+      await SbStore.upsertMany(todo);
+      const after = await SbStore.list();
+      $('#o3').innerHTML = '✓ Done. The database now has <b>' + after.length + ' BPs</b>. <a href="./">Open the tracker →</a>';
+      done(3); btn.hidden = true;
+    } catch (err) { $('#e3').textContent = err.message; btn.disabled = false; btn.textContent = 'Copy into the database'; }
+  });
+})();
+</script>
+</body></html>

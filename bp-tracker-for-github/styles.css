@@ -438,3 +438,6 @@ body.gated { overflow: hidden; }
 .sw.on { background: var(--g); }
 .sw.on::after { left: 14px; }
 .cols-foot { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid var(--br); margin-top: 8px; padding-top: 8px; font-size: 11px; color: var(--mt); }
+.team li { justify-content: space-between; }
+.team li span { display: flex; flex-direction: column; flex: 1; opacity: 1; font-size: 12px; }
+.team li span small { color: var(--mt); font-size: 11px; }

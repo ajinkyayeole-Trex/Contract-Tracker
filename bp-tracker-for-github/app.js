@@ -44,6 +44,7 @@
       return data;
     },
     async init() {
+      if (window.SbStore && SbStore.configured()) { state.demo = true; await this.initSupabase(); state.syncedAt = new Date(); return; }
       try {
         if (location.protocol === 'file:' || (window.GhStore && GhStore.repo())) throw new Error('no server');
         state.me = await this.call('GET', 'api/me');
@@ -55,6 +56,34 @@
         else this.initLocal();
       }
       state.syncedAt = new Date();
+    },
+    // Supabase database: everyone logs in with their work email + password
+    async initSupabase() {
+      state.mode = 'supabase';
+      let me = await SbStore.restore();
+      if (!me) me = await gate({ label: 'Work email', type: 'email', hint: 'Log in with your work email and the password you got from the admin.', login: (id, pw) => SbStore.login(id, pw) });
+      state.me = { name: me.name || me.email, email: me.email, role: me.role, id: me.id, canEdit: me.role === 'editor' || me.role === 'admin' };
+      try { state.contracts = await SbStore.list(); }
+      catch (e) { state.contracts = []; toastLater(e.message); }
+      sbBanner();
+    },
+    // Change one BP on top of the latest saved copy (Supabase)
+    async sbEdit(c, fn) {
+      if (!state.me.canEdit) throw new Error('You can only view the tracker. Ask the admin to make you an editor.');
+      const by = state.me.name;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const cur = await SbStore.getOne(c.id);
+        if (!cur) { const e = new Error(`${c.bpName} is no longer in the tracker.`); e.latest = await SbStore.list(); throw e; }
+        if (cur.updatedAt !== c.updatedAt) {
+          const last = (cur.history || []).slice(-1)[0];
+          const e = new Error(`${cur.bpName} was just changed by ${last ? last.by : 'someone else'}. The latest version is shown now: make your change again.`);
+          e.current = cur; throw e;
+        }
+        const next = fn(cur, by);
+        if (next.updatedAt === cur.updatedAt) return cur;
+        try { return await SbStore.update(next, cur.updatedAt); } catch (e) { if (!e.conflict) throw e; }
+      }
+      throw new Error('Someone else is saving at the same moment. Wait a few seconds and try again.');
     },
     // Published on GitHub Pages: everyone shares data.json in the repository
     async initGithub() {
@@ -104,6 +133,13 @@
       return res.result;
     },
     async create(body) {
+      if (state.mode === 'supabase') {
+        if (!state.me.canEdit) throw new Error('You can only view the tracker. Ask the admin to make you an editor.');
+        const latest = await SbStore.list();
+        const dup = C.findDuplicate(latest, body.bpName);
+        if (dup) { const e = new Error(`This BP is already in the tracker as “${dup.bpName}”. Open it from the list instead.`); e.latest = latest; throw e; }
+        return SbStore.insert(C.createContract(body, state.me.name));
+      }
       if (state.mode === 'github') {
         const by = state.me.name;
         const res = await GhStore.commit((list) => {
@@ -123,16 +159,19 @@
       return this.call('POST', 'api/contracts', body);
     },
     async update(c, changes) {
+      if (state.mode === 'supabase') return this.sbEdit(c, (cur, by) => C.updateContract(cur, changes, by));
       if (state.mode === 'github') return this.ghEdit(c, (cur, by) => C.updateContract(cur, changes, by), 'Update ' + c.bpName);
       if (state.demo) return C.updateContract(c, changes, state.me.name);
       return this.call('PATCH', 'api/contracts/' + c.id, { changes, updatedAt: c.updatedAt });
     },
     async reject(c, body) {
+      if (state.mode === 'supabase') return this.sbEdit(c, (cur, by) => C.rejectContract(cur, body, by));
       if (state.mode === 'github') return this.ghEdit(c, (cur, by) => C.rejectContract(cur, body, by), 'Reject ' + c.bpName);
       if (state.demo) return C.rejectContract(c, body, state.me.name);
       return this.call('POST', 'api/contracts/' + c.id + '/reject', Object.assign({ updatedAt: c.updatedAt }, body));
     },
     async resend(c) {
+      if (state.mode === 'supabase') return this.sbEdit(c, (cur, by) => C.resendContract(cur, by));
       if (state.mode === 'github') return this.ghEdit(c, (cur, by) => C.resendContract(cur, by), 'Resend ' + c.bpName);
       if (state.demo) return C.resendContract(c, state.me.name);
       return this.call('POST', 'api/contracts/' + c.id + '/resend', { updatedAt: c.updatedAt });
@@ -168,21 +207,58 @@
       : `<b>View only.</b> This shows everything the team has saved.${last} Editors: <button type="button" class="link-btn" id="btn-signin">🔑 sign in</button> to add or change BPs.`) + lock;
   }
 
-  // ---------- Login screen (when the data is protected) ----------
-  function gate() {
+  function sbBanner() {
+    const b = $('#preview-banner'); b.hidden = false; b.className = 'banner ' + (state.me.canEdit ? 'ok' : '');
+    const role = { admin: 'Admin', editor: 'Editor', viewer: 'View only' }[state.me.role] || '';
+    b.innerHTML = `🔒 Logged in as <b>${esc(state.me.name)}</b> (${role}). ${state.me.canEdit ? 'Every change is saved for the whole team straight away.' : 'You can see everything; ask the admin if you need to make changes.'}`
+      + (state.me.role === 'admin' ? ` <button type="button" class="link-btn" id="btn-team">👥 Team</button>` : '')
+      + ` <button type="button" class="link-btn" id="btn-chpw">Change password</button> <button type="button" class="link-btn" id="btn-sblogout">Log out</button>`;
+  }
+
+  // ---------- Login screen (protected data, or Supabase) ----------
+  function gate(opt) {
+    opt = opt || {};
     const g = $('#gate'); g.hidden = false; document.body.classList.add('gated');
-    const f = $('#form-gate'); $('[name=loginId]', f).focus();
+    const f = $('#form-gate'); const id = $('[name=loginId]', f);
+    if (opt.label) { id.closest('label').firstChild.textContent = opt.label; id.type = opt.type || 'text'; id.autocomplete = 'email'; }
+    if (opt.hint) $('#form-gate .hint').textContent = opt.hint;
+    id.focus();
+    const doLogin = opt.login || ((a, b) => GhStore.login(a, b));
     return new Promise((resolve) => {
       f.onsubmit = async (e) => {
         e.preventDefault();
         const btn = $('button[type=submit]', f); btn.disabled = true; btn.textContent = 'Checking…'; $('#gate-error').textContent = '';
         try {
-          await GhStore.login($('[name=loginId]', f).value, $('[name=password]', f).value);
-          $('[name=password]', f).value = ''; g.hidden = true; document.body.classList.remove('gated'); resolve();
+          const out = await doLogin(id.value, $('[name=password]', f).value);
+          $('[name=password]', f).value = ''; g.hidden = true; document.body.classList.remove('gated'); resolve(out);
         } catch (err) { $('#gate-error').textContent = err.message; $('[name=password]', f).select(); }
         finally { btn.disabled = false; btn.textContent = 'Log in'; }
       };
     });
+  }
+
+  // ---------- Supabase: team and password ----------
+  async function openTeam() {
+    $('#team-error').textContent = ''; $('#team-list').innerHTML = '<li class="muted">Loading…</li>'; $('#dlg-team').showModal();
+    try { drawTeam(await SbStore.team()); } catch (e) { $('#team-error').textContent = e.message; }
+  }
+  function drawTeam(rows) {
+    const opt = (r, v, l) => `<option value="${v}"${r.role === v ? ' selected' : ''}>${l}</option>`;
+    $('#team-list').innerHTML = rows.map((r) => `<li><span><b>${esc(r.name || r.email)}</b><small>${esc(r.email)}</small></span>
+      <select class="sel sm" data-role-for="${esc(r.id)}">${opt(r, 'viewer', 'View only')}${opt(r, 'editor', 'Editor')}${opt(r, 'admin', 'Admin')}</select></li>`).join('') || '<li class="muted">Nobody yet</li>';
+  }
+  async function changeRole(sel) {
+    $('#team-error').textContent = '';
+    try { await SbStore.setRole(sel.dataset.roleFor, sel.value); toast('Saved. It applies the next time they open the tracker.'); }
+    catch (e) { $('#team-error').textContent = /admin/i.test(e.message) ? e.message : 'Could not change the role: ' + e.message; drawTeam(await SbStore.team()); }
+  }
+  async function doChangePassword(e) {
+    e.preventDefault();
+    const f = e.target; const a = $('[name=pw1]', f).value, b = $('[name=pw2]', f).value;
+    $('#chpw-error').textContent = '';
+    if (a !== b) { $('#chpw-error').textContent = 'The two passwords are not the same.'; return; }
+    try { await SbStore.changePassword(a); f.reset(); $('#dlg-chpw').close(); toast('Password changed'); }
+    catch (err) { $('#chpw-error').textContent = err.message; }
   }
 
   // Editors: turn on protection the first time
@@ -748,9 +824,9 @@
   }
 
   function renderHeader() {
-    $('#who').textContent = state.me.canEdit ? `${state.me.name || 'Signed in'} · Editor` : `${state.me.name} · View only`;
+    $('#who').textContent = state.me.role === 'admin' ? `${state.me.name} · Admin` : state.me.canEdit ? `${state.me.name || 'Signed in'} · Editor` : `${state.me.name} · View only`;
     const live = $('#live-badge');
-    const isLive = !state.demo || state.mode === 'github';
+    const isLive = !state.demo || state.mode === 'github' || state.mode === 'supabase';
     live.className = isLive ? 'bdg bdg-g' : 'bdg bdg-a';
     live.innerHTML = `<span class="dot"></span>${isLive ? 'Live' : 'Preview'}`;
     $('#last-upd').textContent = state.syncedAt ? 'Synced ' + state.syncedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '';
@@ -1338,6 +1414,7 @@
   // Refresh every minute so leadership always sees the latest.
   async function poll() {
     if (state.mode === 'github') return pollGithub();
+    if (state.mode === 'supabase') return pollSupabase();
     if (state.demo || document.hidden || isDirty() || document.querySelector('dialog[open]')) return;
     if (document.activeElement && document.activeElement.closest('#rows')) return;
     try {
@@ -1347,6 +1424,15 @@
     } catch (e) { /* keep showing the last data */ }
   }
 
+  async function pollSupabase() {
+    if (document.hidden || isDirty() || document.querySelector('dialog[open]')) return;
+    if (document.activeElement && document.activeElement.closest('#rows')) return;
+    try {
+      state.contracts = await SbStore.list(); state.syncedAt = new Date();
+      if (state.openId) { const c = byId(state.openId); if (c) state.draft = clone(c); else { state.openId = null; $('#drawer').hidden = true; } }
+      renderAll();
+    } catch (e) { if (e.loggedOut) location.reload(); }
+  }
   async function pollGithub() {
     if (document.hidden || isDirty() || document.querySelector('dialog[open]')) return;
     if (document.activeElement && document.activeElement.closest('#rows')) return;
@@ -1388,6 +1474,9 @@
       if (e.target.closest('#btn-protect')) openProtect();
       if (e.target.closest('#btn-logins')) openLogins();
       if (e.target.closest('#btn-logout')) { GhStore.logout(); location.reload(); }
+      if (e.target.closest('#btn-sblogout')) { SbStore.logout().then(() => location.reload()); }
+      if (e.target.closest('#btn-team')) openTeam();
+      if (e.target.closest('#btn-chpw')) { $('#form-chpw').reset(); $('#chpw-error').textContent = ''; $('#dlg-chpw').showModal(); }
       if (e.target.closest('#btn-signout') && confirm('Sign out? You will see the tracker as view only on this computer.')) {
         GhStore.editor.clear(); state.me = { name: 'Viewer', canEdit: false }; state.openId = null; $('#drawer').hidden = true; githubBanner(); renderAll();
       }
@@ -1396,6 +1485,12 @@
     if ($('#form-signin')) {
       $('#form-signin').addEventListener('submit', doSignin);
       $('#dlg-signin [data-cancel]').addEventListener('click', () => $('#dlg-signin').close());
+    }
+    if ($('#dlg-team')) {
+      $('#team-list').addEventListener('change', (e) => { if (e.target.dataset.roleFor) changeRole(e.target); });
+      $('#dlg-team [data-cancel]').addEventListener('click', () => $('#dlg-team').close());
+      $('#form-chpw').addEventListener('submit', doChangePassword);
+      $('#dlg-chpw [data-cancel]').addEventListener('click', () => $('#dlg-chpw').close());
     }
     if ($('#form-protect')) {
       $('#form-protect').addEventListener('submit', doProtect);
