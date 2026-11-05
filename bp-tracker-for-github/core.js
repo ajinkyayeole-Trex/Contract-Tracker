@@ -479,9 +479,9 @@
     const first = (n) => (String(n || '').toLowerCase().replace(/['’`´]\s*s\b/g, '').match(/[a-z0-9]+/) || [''])[0];
     const fits = (a) => {
       const x = nameKey(a);
-      if (x.length >= 5 && k.length >= 5 && (x.startsWith(k) || k.startsWith(x))) return true;
-      // Short names like "UBS": the same first word, and one name is the start of the other
-      return first(a).length >= 3 && first(a) === first(name) && x && k && (x.startsWith(k) || k.startsWith(x));
+      // One name is the other plus extra words, but only extra words that never tell two BPs apart (Pvt Ltd, Mobility Solutions…).
+      // "Sunny Sharma" ≠ "Sunny Holidays", "New Himalaya Travels" ≠ "New Himalaya Travels (Firm)": those are different BPs.
+      return x.length >= 3 && x === k;
     };
     // Several BPs may fit (e.g. "Asian Shina…" and "Asian Travels"): take the one whose name is closest
     const cands = list.filter((c) => !c.archived && [c.bpName].concat(c.aliases || []).some(fits))
@@ -489,9 +489,9 @@
       .sort((a, b) => b.score - a.score);
     const sim = similarBps(list, name)[0];
     const near = cands.length ? (sim && sim.score > cands[0].score ? sim.c : cands[0].c) : null;
-    if (near) return { c: near, how: 'similar' };
-    const best = similarBps(list, name)[0];
-    return best && best.score >= 0.9 ? { c: best.c, how: 'similar' } : null;
+    // Only a name that is really the same counts. A merely similar name (Supreme Travels / Supreme Enterprises) is a
+    // different BP until someone says otherwise: the form shows the "looks like an existing BP" note for that.
+    return near ? { c: near, how: 'similar' } : null;
   }
   // Two PDFs belong to the same BP (used when several PDFs are attached together)
   function sameBp(a, b) {

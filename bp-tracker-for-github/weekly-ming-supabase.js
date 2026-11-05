@@ -38,7 +38,9 @@ function apply(data, reports) {
     let c = null;
     const byName = rep.bp ? C.matchBp(list, rep.bp) : null;
     if (byName && (overlap(byName.c) > 0 || !(byName.c.lines || []).length)) c = byName.c;
-    if (!c) { const best = list.filter((x) => !x.archived).map((x) => ({ x, n: overlap(x) })).filter((o) => o.n > 0).sort((a, b) => b.n - a.n)[0]; if (best) c = best.x; }
+    // Only fall back to matching by line codes when the name is close too: a different BP (e.g. Jagan Transports)
+    // can share line codes with the BP that took those lines over (Mozo), and must not be booked under it
+    if (!c) { const best = list.filter((x) => !x.archived).map((x) => ({ x, n: overlap(x), s: rep.bp ? Math.max(...[x.bpName].concat(x.aliases || []).map((a) => C.nameScore(rep.bp, a))) : 1 })).filter((o) => o.n > 0 && o.s >= 0.6).sort((a, b) => b.n - a.n)[0]; if (best) c = best.x; }
     if (!c) { sum.notInTracker.push(`${rep.bp} (${codes.join(', ')})`); return; }
     const old = c.revenueReport;
     if (old && old.periodEnd && old.periodEnd > per.end) { sum.skipped.push(`${c.bpName}: already has the newer ${old.period}`); return; }
