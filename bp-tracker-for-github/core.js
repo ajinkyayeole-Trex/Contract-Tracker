@@ -382,8 +382,8 @@
     if (!c.region) f.push({ level: 2, text: 'Region not set: pick N/W or South' });
     const mc = mingCheck(c);
     const n2 = (v) => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? '—' : Number(v).toFixed(2));
-    // Small differences (₹0.08/km or less) are only highlighted in the Lines & MinG tab, not raised here
-    mc.items.filter((i) => i.status === 'mismatch' && !(Math.abs(Number(i.diff)) <= MING_TOLERANCE + 1e-9)).forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
+    // Small differences (₹0.08/km or less) are only highlighted (unless the BP is marked mingStrict: every difference is raised) in the Lines & MinG tab, not raised here
+    mc.items.filter((i) => i.status === 'mismatch' && (c.mingStrict || !(Math.abs(Number(i.diff)) <= MING_TOLERANCE + 1e-9))).forEach((i) => f.push({ level: 3, text: `MinG mismatch on ${i.code}: contract ₹${n2(i.contract)}/km, revenue report ₹${n2(i.paid)}/km (${mc.period})` }));
     if (!c.lines.length && mc.extra.length) f.push({ level: 2, text: `Revenue report pays ${mc.extra.length} line${mc.extra.length > 1 ? 's' : ''} (${mc.extra.map((x) => x.code).join(', ')}) but no Lines Annex is entered (${mc.period})` });
     else mc.extra.forEach((x) => f.push({ level: 3, text: x.oldLine
       ? `Finance still pays the old line code ${x.code} (₹${n2(x.paid)}/km)${x.replacedBy ? ', replaced by ' + x.replacedBy : ''}${x.endedOn ? ' from ' + addDays(x.endedOn, 1) : ''}: ask Finance to switch to the new code (${mc.period})`
