@@ -611,6 +611,107 @@
     a.click(); toast('Exported region comparison');
   }
 
+  // ---------- Performance: payout (Bus Cost from the Revenue Share Reports, pro rata by day) ----------
+  state.perf = { q: 0, open: null };
+  const today = () => new Date().toISOString().slice(0, 10);
+  const pct = (a, b) => (b ? Math.round(((a - b) / b) * 100) : null);
+  const crore = (n) => (n >= 1e7 ? '₹' + fmt(n / 1e7, 2) + '<span>Cr</span>' : '₹' + fmt(n / 1e5, 1) + '<span>L</span>');
+  const kmShort = (n) => (n >= 1e7 ? fmt(n / 1e7, 2) + '<span>Cr km</span>' : fmt(n / 1e5, 2) + '<span>L km</span>');
+  // History start = the week most BPs' first report starts (a single earlier report doesn't count), last = latest report end
+  function perfSpan() {
+    const firsts = {}; let last = null;
+    state.contracts.forEach((c) => { const R = c.reports || []; if (!R.length) return; const f = R.map((r) => r.start).sort()[0]; firsts[f] = (firsts[f] || 0) + 1; R.forEach((r) => { if (!last || r.end > last) last = r.end; }); });
+    const first = Object.keys(firsts).sort((a, b) => firsts[b] - firsts[a] || (a < b ? -1 : 1))[0] || null;
+    return { first, last };
+  }
+  function perfData() {
+    const q = C.fyQuarter(today(), state.perf.q), p = C.fyQuarter(today(), state.perf.q + 1), sp = perfSpan();
+    // Days of each quarter covered by the saved reports: the change is compared per day (pro rata), so a quarter that has only just started is fair against a full one
+    const cover = (x) => (sp.first ? C.overlapDays(x.start, x.end, sp.first, sp.last) : 0);
+    const dq = cover(q), dp = cover(p);
+    const perDay = (a, b) => (dq && dp && b ? Math.round(((a / dq) / (b / dp) - 1) * 100) : null);
+    const rows = inScope().filter((c) => (c.reports || []).length).map((c) => {
+      const a = C.payoutBetween(c, q.start, q.end), b = C.payoutBetween(c, p.start, p.end);
+      return { c, a, b, ch: perDay(a.cost, b.cost), perKm: a.km ? a.cost / a.km : null, lines: perfLineRows(c).rows.length };
+    }).filter((r) => r.a.cost || r.b.cost).sort((x, y) => y.a.cost - x.a.cost || y.b.cost - x.b.cost);
+    const span = (x, d) => { if (!d) return 'no reports saved'; const s = x.start > sp.first ? x.start : sp.first, e = x.end < sp.last ? x.end : sp.last; return s === x.start && e === x.end ? 'full quarter' : `${dShort(s)} – ${dShort(e)}`; };
+    return { q, p, rows, first: sp.first, last: sp.last, dq, dp, perDay, spanQ: span(q, dq), spanP: span(p, dp) };
+  }
+  function renderPerformance() {
+    const el = $('#perf-tbl'); if (!el) return;
+    const d = perfData();
+    $('#perf-q').innerHTML = [0, 1, 2, 3].map((i) => { const q = C.fyQuarter(today(), i); return `<button data-q="${i}" class="${state.perf.q === i ? 'on' : ''}">${esc(q.label)} <small>${esc(q.months)}</small></button>`; }).join('');
+    $('#perf-note').textContent = d.first ? `Payout = Bus Cost in Finance's Revenue Share Reports, split by day. Reports saved from ${dShort(d.first)} to ${dShort(d.last)}.` : 'No revenue share reports saved yet.';
+    const sum = (k, w) => d.rows.reduce((t, r) => t + r[w][k], 0);
+    const A = sum('cost', 'a'), B = sum('cost', 'b'), KA = sum('km', 'a'), KB = sum('km', 'b');
+    const chg = (x, y) => { const v = d.perDay(x, y); return v === null ? `nothing saved for ${esc(d.p.months)}` : `<span class="${v >= 0 ? 'up' : 'dn'}">${v >= 0 ? '▲' : '▼'} ${Math.abs(v)}%</span> a day vs ${esc(d.p.months)}`; };
+    const missing = d.rows.filter((r) => r.c.autoCreated && !(r.c.lines || []).some((l) => l.source !== 'report')).length;
+    const kpi = (ac, l, v, s2) => `<div class="kpi" style="--ac:${ac}"><div class="kl">${l}</div><div class="kv">${v}</div><div class="ks">${s2}</div></div>`;
+    $('#perf-kpis').innerHTML = kpi('var(--g)', `Payout · ${esc(d.q.months)}`, crore(A), chg(A, B)) + kpi('var(--bl)', `KMs driven · ${esc(d.q.months)}`, kmShort(KA), chg(KA, KB))
+      + kpi('var(--am)', 'Average paid per km · all BPs', KA ? '₹' + fmt(A / KA, 2) + '<span>/km</span>' : '—', KB ? `${esc(d.p.months)}: ₹${fmt(B / KB, 2)}/km` : '')
+      + kpi('var(--pu)', 'BPs paid', d.rows.filter((r) => r.a.cost).length + '<span>BPs</span>', missing ? `${missing} with missing contract` : 'all with a contract');
+    $('#perf-title').innerHTML = `Payout to BPs · ${esc(d.q.label)} <small>${esc(d.q.months)}: ${esc(d.spanQ)} · ${esc(d.p.months)}: ${esc(d.spanP)}</small>`;
+    el.innerHTML = `<thead><tr><th>BP</th><th>Region</th><th class="num">Annual mileage<br><small>Vehicles Annex</small></th><th class="num">Payout ${esc(d.q.months)} (₹)</th><th class="num">Payout ${esc(d.p.months)} (₹)</th><th class="num">Change<br><small>per day, pro rata</small></th><th class="num">KMs driven<br><small>${esc(d.q.months)}</small></th><th class="num">Avg paid per km<br><small>all lines · payout ÷ KMs</small></th></tr></thead><tbody>`
+      + (d.rows.map((r) => { const noC = r.c.autoCreated && !(r.c.lines || []).some((l) => l.source !== 'report');
+        return `<tr class="clickrow ${state.perf.open === r.c.id ? 'sel' : ''}" data-perf-bp="${esc(r.c.id)}"><td><b>${esc(r.c.bpName)}</b>${noC ? ' <span class="sp sp-r">Missing contract</span>' : ''}<span class="sub">${r.lines} line${r.lines === 1 ? '' : 's'} · click to open</span></td><td>${esc(r.c.region || '—')}</td>
+        <td class="num">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">—</span>'}</td><td class="num">${r.a.cost ? fmt(r.a.cost, 0) : '<span class="muted">—</span>'}</td><td class="num">${r.b.cost ? fmt(r.b.cost, 0) : '<span class="muted">—</span>'}</td>
+        <td class="num ${r.ch === null ? '' : r.ch >= 0 ? 'up' : 'dn'}">${r.ch === null ? (r.b.cost ? '' : '<span class="muted">new</span>') : r.a.cost ? (r.ch >= 0 ? '▲ ' : '▼ ') + Math.abs(r.ch) + '%' : '<span class="muted">not paid</span>'}</td><td class="num">${r.a.km ? fmt(r.a.km, 0) : '—'}</td><td class="num">${r.perKm ? fmt(r.perKm, 2) : '—'}</td></tr>`; }).join('')
+      || '<tr><td colspan="8" class="empty" style="padding:16px">No payouts in this quarter yet.</td></tr>') + '</tbody>'
+      + (d.rows.length ? `<tfoot><tr><td colspan="3"><b>Total · ${d.rows.length} BPs</b></td><td class="num"><b>${fmt(A, 0)}</b></td><td class="num"><b>${fmt(B, 0)}</b></td><td class="num">${d.perDay(A, B) === null ? '' : (d.perDay(A, B) >= 0 ? '▲ ' : '▼ ') + Math.abs(d.perDay(A, B)) + '%'}</td><td class="num"><b>${fmt(KA, 0)}</b></td><td class="num">${KA ? fmt(A / KA, 2) : ''}</td></tr></tfoot>` : '');
+    renderPerfLines(); renderPerfKm();
+  }
+  function perfLineRows(c) {
+    const h = C.lineHistory(c); const out = [];
+    const byKey = {}; (c.lines || []).forEach((l) => { byKey[C.lineKey(l.code)] = l; });
+    Object.values(h.lines).sort((a, b) => b.cost - a.cost).forEach((o) => { const l = byKey[C.lineKey(o.code)]; out.push({ code: l ? l.code : o.code, route: l ? l.route || '' : '', inAnnex: !!l && l.source !== 'report', first: o.first, rt: o.trips / 2, km: o.km, week: o.week, cost: o.cost }); });
+    (c.lines || []).filter((l) => l.code && !h.lines[C.lineKey(l.code)] && !l.replacedBy).forEach((l) => out.push({ code: l.code, route: l.route || '', inAnnex: l.source !== 'report', first: null, rt: 0, km: 0, week: 0, cost: 0, unpaid: true }));
+    return { rows: out, lastWeek: h.lastWeek, noContract: !!c.autoCreated && !(c.lines || []).some((l) => l.source !== 'report') };
+  }
+  function renderPerfLines() {
+    const box = $('#perf-lines'); const c = state.perf.open && byId(state.perf.open);
+    if (!c) { box.hidden = true; box.innerHTML = ''; return; }
+    const d = perfLineRows(c); const T = (k) => d.rows.reduce((t, r) => t + r[k], 0);
+    box.hidden = false;
+    box.innerHTML = `<div class="ct"><span>${esc(c.bpName)} · lines${d.noContract ? ' <span class="sp sp-r">Missing contract</span>' : ''}</span><span class="fs"><small>Effective from = first week Finance paid the line</small><button class="gh-btn" data-perf-xls>⬇ Excel</button><button class="gh-btn" data-perf-close>Close</button></span></div>
+      <div class="tw"><table class="dt"><thead><tr><th>Line code</th><th>Route</th><th class="num">Effective from</th><th class="num">Round trips<br><small>till date</small></th><th class="num">KMs driven<br><small>till date</small></th><th class="num">Payout this week (₹)<br><small>${esc(d.lastWeek || '')}</small></th><th class="num">Payout till date (₹)</th></tr></thead><tbody>`
+      + d.rows.map((r) => `<tr><td class="mono">${esc(r.code)}${r.inAnnex || d.noContract ? '' : ' <span class="sp sp-r">not in Lines Annex</span>'}</td><td>${esc(r.route)}</td><td class="num">${r.unpaid ? '<span class="muted">not paid yet</span>' : dShort(r.first)}</td><td class="num">${fmt(r.rt, 1)}</td><td class="num">${fmt(r.km, 0)}</td><td class="num">${r.week ? fmt(r.week, 0) : '—'}</td><td class="num">${fmt(r.cost, 0)}</td></tr>`).join('')
+      + `</tbody><tfoot><tr><td colspan="3"><b>Total · ${d.rows.length} line${d.rows.length === 1 ? '' : 's'}</b></td><td class="num"><b>${fmt(T('rt'), 1)}</b></td><td class="num"><b>${fmt(T('km'), 0)}</b></td><td class="num"><b>${fmt(T('week'), 0)}</b></td><td class="num"><b>${fmt(T('cost'), 0)}</b></td></tr></tfoot></table></div>`;
+  }
+  function kmRows() {
+    return inScope().filter((c) => (c.reports || []).length).map((c) => {
+      const first = (c.reports || []).map((r) => r.start).sort()[0], last = (c.reports || []).map((r) => r.end).sort().pop();
+      const driven = C.payoutBetween(c, first, last).km;
+      const days = C.overlapDays(first, last, first, last);
+      const exp = c.annualMileage ? (c.annualMileage * days) / 365 : null;
+      return { c, first, last, driven, exp, ratio: exp ? driven / exp : null };
+    }).sort((a, b) => (a.ratio === null) - (b.ratio === null) || Math.abs((b.ratio || 1) - 1) - Math.abs((a.ratio || 1) - 1));
+  }
+  function renderPerfKm() {
+    const rows = kmRows();
+    $('#perf-km').innerHTML = `<thead><tr><th>BP</th><th class="num">Annual mileage<br><small>Vehicles Annex</small></th><th class="num">Expected till date<br><small>pro rata, up to the latest report</small></th><th class="num">Driven till date<br><small>revenue reports</small></th><th>Progress</th><th>Status</th></tr></thead><tbody>`
+      + rows.map((r) => { const p = r.ratio === null ? null : Math.round(r.ratio * 100); const off = p === null ? null : p - 100;
+        const cls = off === null ? 'warn' : Math.abs(off) <= 15 ? 'ok' : Math.abs(off) <= 25 ? 'warn' : 'bad';
+        const col = { ok: 'var(--g)', warn: 'var(--am)', bad: 'var(--rd)' }[cls];
+        const status = off === null ? 'add Vehicles Annex' : Math.abs(off) <= 15 ? '✓ on track' : `${Math.abs(off)}% ${off < 0 ? 'behind' : 'ahead'}`;
+        return `<tr><td><b>${esc(r.c.bpName)}</b><span class="sub">${dShort(r.first)} – ${dShort(r.last)}</span></td><td class="num">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">—</span>'}</td><td class="num">${r.exp ? fmt(r.exp, 0) : '—'}</td><td class="num">${fmt(r.driven, 0)}</td>
+          <td>${p === null ? '—' : `<span class="track"><span class="fill" style="width:${Math.min(p, 100)}%;background:${col}"></span></span>${p}%`}</td><td><span class="chip ${cls}">${status}</span></td></tr>`; }).join('') + '</tbody>';
+  }
+  function downloadCsv(name, head, rows) {
+    const csv = [head].concat(rows).map((x) => x.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })); a.download = name; a.click();
+  }
+  function exportPerf() {
+    const d = perfData();
+    downloadCsv(`bp-payout-${d.q.label}.csv`, ['BP', 'Region', 'Missing contract', 'Annual mileage (km)', `Payout ${d.q.months} (₹)`, `Payout ${d.p.months} (₹)`, 'Change %', `KMs ${d.q.months}`, 'Avg paid per km'],
+      d.rows.map((r) => [r.c.bpName, r.c.region, r.c.autoCreated ? 'Yes' : '', r.c.annualMileage || '', Math.round(r.a.cost), Math.round(r.b.cost), r.ch ?? '', Math.round(r.a.km), r.perKm ? r.perKm.toFixed(2) : '']));
+    toast('Exported ' + d.rows.length + ' BPs');
+  }
+  function exportPerfLines() {
+    const c = byId(state.perf.open); if (!c) return; const d = perfLineRows(c);
+    downloadCsv(`bp-lines-${c.bpName}.csv`, ['Line code', 'Route', 'In Lines Annex', 'Effective from (first payout)', 'Round trips', 'KMs till date', 'Payout this week (₹)', 'Payout till date (₹)'],
+      d.rows.map((r) => [r.code, r.route, r.inAnnex ? 'Yes' : 'No', r.first || 'not paid yet', r.rt, Math.round(r.km), Math.round(r.week), Math.round(r.cost)]));
+  }
+
   // ---------- Lines & MinG ----------
   const mingBad = (c, code) => { const m = C.mingCheck(c); return m.items.some((i) => i.code === code && i.status === 'mismatch'); };
   state.lf = { q: '', bad: false };
@@ -636,6 +737,7 @@
     ok: '<span class="sp sp-s">✓ Matches</span>', mismatch: '<span class="sp sp-r">✕ Mismatch</span>', extra: '<span class="sp sp-r">✕ Not in contract</span>',
     'not-in-report': '<span class="sp" style="color:var(--mt);border-color:var(--br2)">Not in report</span>', 'no-report': '<span class="muted">No report yet</span>', 'no-lines': '<span class="muted">Lines Annex needed</span>', 'paid-no-annex': '<span class="sp sp-p">Paid, Lines Annex needed</span>',
     'no-ming': '<span class="sp sp-p">MinG missing</span>',
+    'no-contract': '<span class="sp sp-r">No contract</span>',
     'not-started': '<span class="sp" style="color:var(--bl);border-color:rgba(56,139,253,.4)">Not started yet</span>',
   };
   function renderLinesTab() {
@@ -652,7 +754,7 @@
           <td rowspan="${span}" class="num bp-cell">${r.c.annualMileage ? fmt(r.c.annualMileage, 0) : '<span class="muted">Vehicles Annex needed</span>'}</td>` : ''}
         <td class="mono">${l ? esc(l.code) : '—'}${r.past ? '<span class="sub">old line, ended ' + dShort(l.to) + '</span>' : ''}</td><td class="wrap">${l ? esc(l.route || '') : ''}</td>
         <td>${(r.status === 'extra' || r.status === 'paid-no-annex') ? '<span class="muted">—</span>' : l && r.past ? dShort(l.from) : l && C.lineFrom(r.c, l) ? dShort(C.lineFrom(r.c, l)) + (daysUntil(C.lineFrom(r.c, l)) > 0 ? '<span class="sub future">starts in ' + daysUntil(C.lineFrom(r.c, l)) + ' days</span>' : '') : '<span class="muted">—</span>'}</td>
-        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) + (l.kmsFrom ? '<span class="sub">from revenue report</span>' : '') : (r.status === 'extra' || r.status === 'paid-no-annex') ? '<span class="muted">not in contract</span>' : '<span class="muted">waiting for revenue report</span>'}</td>
+        <td class="num">${l && l.rtKms != null ? fmt(l.rtKms) + (l.kmsFrom ? '<span class="sub">from revenue report</span>' : '') : (r.status === 'extra' || r.status === 'paid-no-annex') ? '<span class="muted">not in contract</span>' : (l && l.source === 'report') ? '<span class="muted">no contract</span>' : '<span class="muted">waiting for revenue report</span>'}</td>
         <td class="num">${l && l.minG != null ? l.minG.toFixed(2) : '—'}</td>
         <td class="num">${l && l.rtAmt != null ? fmt(l.rtAmt) : '—'}</td>
         <td class="num ${diff ? 'days-hot' : ''}">${r.paid != null ? r.paid.toFixed(2) + (diff ? ` <small>(${diff > 0 ? '+' : ''}${diff.toFixed(2)})</small>` : '') : '—'}</td>
@@ -864,7 +966,7 @@
   function renderAll() {
     state.contracts.forEach(C.withDocDefaults);
     // Each part is drawn on its own, so a problem in one never blanks the others
-    [renderHeader, renderScope, renderKpis, renderRegionCompare, renderDiscrepancies, renderLinesTab, renderStageFilters, renderRows, renderAttention]
+    [renderHeader, renderScope, renderKpis, renderRegionCompare, renderDiscrepancies, renderLinesTab, renderStageFilters, renderRows, renderAttention, renderPerformance]
       .forEach((fn) => { try { fn(); } catch (e) { console.error('Dashboard: ' + fn.name + ' failed', e); } });
     if (state.openId) renderDrawer();
   }
@@ -1299,7 +1401,11 @@
     window.addEventListener('scroll', (e) => { if (!pop.hidden && !(e.target.closest && e.target.closest('#cf-pop'))) closePop(); }, true);
     $('#btn-clear-cf').addEventListener('click', () => { state.cf = {}; closePop(); cfApply(); });
     $$('.tn').forEach((b) => b.addEventListener('click', () => { showTab(b.dataset.tab); history.replaceState(null, '', '#' + b.dataset.tab); }));
-    if (/^#(dash|edit|lines|attn)$/.test(location.hash)) showTab(location.hash.slice(1));
+    if (/^#(dash|edit|lines|attn|perf)$/.test(location.hash)) showTab(location.hash.slice(1));
+    $('#perf-q').addEventListener('click', (e) => { const b = e.target.closest('[data-q]'); if (b) { state.perf.q = +b.dataset.q; renderPerformance(); } });
+    $('#perf-tbl').addEventListener('click', (e) => { const r = e.target.closest('[data-perf-bp]'); if (r) { state.perf.open = state.perf.open === r.dataset.perfBp ? null : r.dataset.perfBp; renderPerformance(); if (state.perf.open) $('#perf-lines').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } });
+    $('#perf-lines').addEventListener('click', (e) => { if (e.target.closest('[data-perf-close]')) { state.perf.open = null; renderPerformance(); } if (e.target.closest('[data-perf-xls]')) exportPerfLines(); });
+    $('#btn-export-perf').addEventListener('click', exportPerf);
     $('#f-region').innerHTML += C.OPTIONS.region.map((r) => `<option>${esc(r)}</option>`).join('');
     $('#btn-export-region').addEventListener('click', exportRegionCsv);
     $('#q').addEventListener('input', (e) => { state.f.q = e.target.value; renderStageFilters(); renderRows(); });

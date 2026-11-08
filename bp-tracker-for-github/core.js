@@ -261,6 +261,8 @@
     now = now || new Date().toISOString();
     const changes = pick(patch);
     if (changes.lines) changes.lines = changes.lines.map(normaliseLine).filter((l) => l.code || l.rtAmt || l.rtKms);
+    // A line copied from the revenue report becomes a contract line as soon as someone enters its contract values
+    if (changes.lines) changes.lines.forEach((l) => { if (l.source !== 'report') return; const o = (c.lines || []).find((x) => x.code === l.code && x.source === 'report'); if (!o || ['rtKms', 'minG', 'rtAmt'].some((k) => num(o[k]) !== l[k])) delete l.source; });
     if (changes.stage !== undefined && !ALL_STAGES.includes(changes.stage)) throw new Error('Unknown stage: ' + changes.stage);
     if (changes.stage === REJECTED && c.stage !== REJECTED) throw new Error('Use “Mark as rejected” so the reason is recorded.');
     if (changes.bpName !== undefined && !String(changes.bpName).trim()) throw new Error('BP name cannot be empty.');
@@ -286,7 +288,8 @@
       // Normally the day before the new contract starts; if it "starts" before the old one (back-dated), the day before it was signed
       const base = newEff && (!oldFrom || newEff > oldFrom) ? newEff : (newSign || now.slice(0, 10));
       const to = addDays(base, -1);
-      const past = lineDiff(c.lines, next.lines).filter((d) => d.from && ['removed', 'replaced-old', 'changed'].includes(d.type))
+      // Lines copied from the revenue report (BP added automatically) were never a contract: they are not kept as old lines
+      const past = lineDiff(c.lines, next.lines).filter((d) => d.from && d.from.source !== 'report' && ['removed', 'replaced-old', 'changed'].includes(d.type))
         .map((d) => Object.assign({}, d.from, { from: lineFrom(c, d.from), to, endedBy: d.type === 'changed' ? 'new rate' : d.by || '' }));
       if (past.length) next.pastLines = (c.pastLines || []).concat(past);
     }
@@ -368,6 +371,9 @@
   // What needs someone's attention, most urgent first.
   function flags(c, now) {
     const f = [];
+    if (c && c.autoCreated && !(c.lines || []).some((l) => l.source !== 'report')) {
+      return [{ level: 3, text: 'No contract in the tracker: Finance pays this BP (' + ((c.lines || []).map((l) => l.code).join(', ') || 'see revenue report') + '). Add its Lines Annex and Vehicles Annex.' }];
+    }
     c = Object.assign({ lines: [], docs: {}, history: [], rejections: [] }, c);
     c.lines = Array.isArray(c.lines) ? c.lines.filter(Boolean) : [];
     const last = latestRejection(c);
@@ -417,6 +423,7 @@
     const paidBy = {}; Object.keys(rep0.rates).forEach((k) => { paidBy[lineKey(k)] = { code: k, rate: rep0.rates[k] }; });
     const rep = rep0;
     const end = isDate(rep.periodEnd) ? rep.periodEnd : isDate(rep.receivedOn) ? rep.receivedOn : null;
+    if (c.autoCreated && !(c.lines || []).some((l) => l.source !== 'report')) return { status: 'no-contract', period: rep0.period, items: (c.lines || []).map((l) => ({ code: l.code, contract: null, paid: rep0.rates[l.code] ?? null, status: 'no-contract' })), extra: [] };
     const items = c.lines.filter((l) => l.code).map((l) => {
       const paid = paidBy[lineKey(l.code)] ? paidBy[lineKey(l.code)].rate : undefined;
       const f = lineFrom(c, l);
@@ -459,6 +466,100 @@
       return next;
     });
     return filled;
+  }
+
+  // ---------- Revenue Share Report history (every report kept) ----------
+  const dmyIso = (d) => { const m = /(\d{2})-(\d{2})-(\d{4})/.exec(d || ''); return m ? `${m[3]}-${m[2]}-${m[1]}` : null; };
+  const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const dLabel = (iso) => +iso.slice(8, 10) + ' ' + MON3[+iso.slice(5, 7) - 1];
+  function reportPeriod(subject) {
+    const m = /(\d{2}-\d{2}-\d{4})\s*to\s*(\d{2}-\d{2}-\d{4})/.exec(subject || '');
+    if (!m) return null;
+    const start = dmyIso(m[1]), end = dmyIso(m[2]);
+    const label = start === end ? dLabel(start) + ' ' + end.slice(0, 4) : start.slice(0, 7) === end.slice(0, 7) ? `${+start.slice(8, 10)}–${dLabel(end)} ${end.slice(0, 4)}` : `${dLabel(start)} – ${dLabel(end)} ${end.slice(0, 4)}`;
+    return { start, end, label, days: Math.round((new Date(end + 'T12:00:00Z') - new Date(start + 'T12:00:00Z')) / 864e5) + 1 };
+  }
+  const numOrNull = (v) => { if (v === null || v === undefined || v === '') return null; const n = Number(String(v).replace(/,/g, '')); return isFinite(n) ? n : null; };
+  // Normalise one report email: { bp, subject, received, lines: { CODE: { km, trips, rate, cost } } }
+  function normaliseReport(rep) {
+    const per = reportPeriod(rep.subject); if (!per) return null;
+    const lines = {};
+    Object.keys(rep.lines || {}).forEach((k) => {
+      const code = String(k).trim().toUpperCase(); if (!/^IN[0-9A-Z]{3,}$/.test(code)) return;
+      const l = rep.lines[k] || {}; const km = numOrNull(l.km), trips = numOrNull(l.trips), rate = numOrNull(l.rate);
+      let cost = numOrNull(l.cost); if (cost === null && km !== null && rate !== null) cost = round2(km * rate);
+      lines[code] = { km, trips, rate, cost };
+    });
+    if (!Object.keys(lines).length) return null;
+    return { start: per.start, end: per.end, period: per.label, days: per.days, from: String(rep.bp || '').trim(), received: String(rep.received || '').slice(0, 10), lines };
+  }
+  // The report the MinG check uses: the latest one covering at least 3 days (a 1-day stub like 1 Nov never replaces a week)
+  function deriveRevenueReport(c) {
+    const R = (c.reports || []).filter((r) => r.days >= 3).sort((a, b) => (a.end < b.end ? -1 : 1));
+    const r = R[R.length - 1]; if (!r) return c.revenueReport || null;
+    const rates = {}, lineKm = {}; let totalKm = 0;
+    Object.keys(r.lines).forEach((k) => { const l = r.lines[k]; if (l.rate !== null) rates[k] = l.rate; if (l.km !== null) totalKm += l.km; if (l.km > 0 && l.trips >= 2) lineKm[k] = round2(l.km / (l.trips / 2)); });
+    return { period: r.period, periodEnd: r.end, receivedOn: r.received, rates, totalKm: round2(totalKm), lineKm, from: r.from };
+  }
+  // Add one report to a BP (same BP name + same dates = replaced, not doubled). Returns true if anything changed.
+  function addReport(c, rep) {
+    const r = rep && rep.start && rep.end && rep.days ? rep : normaliseReport(rep); if (!r) return false;
+    const list = (c.reports || []).slice();
+    const i = list.findIndex((x) => x.start === r.start && x.end === r.end && nameKey(x.from) === nameKey(r.from));
+    if (i >= 0) { if (sameValue(list[i], r)) return false; list[i] = r; } else list.push(r);
+    list.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+    c.reports = list; c.revenueReport = deriveRevenueReport(c);
+    if (c.autoCreated) refreshReportLines(c);
+    return true;
+  }
+  // BPs created from a report (no contract yet): their lines are the codes Finance pays, MinG = the rate paid, RT kms / amount blank
+  function refreshReportLines(c) {
+    const last = {}; (c.reports || []).forEach((r) => Object.keys(r.lines).forEach((k) => { last[k] = r.lines[k].rate; }));
+    const keep = (c.lines || []).filter((l) => l.source !== 'report');
+    if (keep.length) return; // a contract was added: its lines win
+    c.lines = Object.keys(last).map((k) => ({ code: k, minG: last[k], rtKms: null, rtAmt: null, calc: null, source: 'report' }));
+  }
+  function regionFromCodes(codes) { const s = codes.filter((k) => /^IN[45]/.test(k)).length; return s > codes.length / 2 ? 'South' : 'N/W'; }
+  function contractFromReport(r, user) {
+    const c = createContract({ bpName: r.from, region: regionFromCodes(Object.keys(r.lines)), stage: STAGES[0], lines: [],
+      comments: 'Added automatically: Finance pays this BP but its contract is not in the tracker yet. Lines and MinG are taken from the Revenue Share Report.',
+      historyNote: 'Created from the Revenue Share Report ' + r.period + '.' }, user || 'Revenue report check');
+    c.autoCreated = true; c.lines = [];
+    return c;
+  }
+  // ---------- Pro-rata payouts (a report is spread evenly over its days) ----------
+  const addDaysIso = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  function overlapDays(a1, a2, b1, b2) { const s = a1 > b1 ? a1 : b1, e = a2 < b2 ? a2 : b2; return s > e ? 0 : Math.round((new Date(e + 'T12:00:00Z') - new Date(s + 'T12:00:00Z')) / 864e5) + 1; }
+  // Payout (Bus Cost) and KMs between two dates, per BP or per line
+  function payoutBetween(c, from, to, code) {
+    let cost = 0, km = 0, trips = 0;
+    (c.reports || []).forEach((r) => {
+      const d = overlapDays(r.start, r.end, from, to); if (!d) return; const f = d / r.days;
+      Object.keys(r.lines).forEach((k) => { if (code && lineKey(k) !== lineKey(code)) return; const l = r.lines[k]; cost += (l.cost || 0) * f; km += (l.km || 0) * f; trips += (l.trips || 0) * f; });
+    });
+    return { cost: round2(cost), km: round2(km), trips: Math.round(trips * 10) / 10 };
+  }
+  // Financial-year quarter (Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar) containing a date, and the one before
+  function fyQuarter(iso, back) {
+    let y = +iso.slice(0, 4), m = +iso.slice(5, 7); let q0 = Math.floor((m - 1) / 3) * 3 + 1; // calendar quarter start month (Jan/Apr/Jul/Oct)
+    for (let i = 0; i < (back || 0); i++) { q0 -= 3; if (q0 < 1) { q0 += 12; y -= 1; } }
+    const start = `${y}-${String(q0).padStart(2, '0')}-01`; const endM = q0 + 2;
+    const end = addDaysIso(`${endM === 12 ? y + 1 : y}-${String(endM === 12 ? 1 : endM + 1).padStart(2, '0')}-01`, -1);
+    const fy = q0 >= 4 ? y : y - 1; const qn = { 4: 1, 7: 2, 10: 3, 1: 4 }[q0];
+    return { start, end, label: `Q${qn} FY${String(fy).slice(2)}-${String(fy + 1).slice(2)}`, months: `${MON3[q0 - 1]}–${MON3[endM - 1]} ${end.slice(0, 4)}` };
+  }
+  // Per line: first week paid (= effective from), round trips, KMs and payout till date, payout in the latest report
+  function lineHistory(c) {
+    const out = {};
+    const R = (c.reports || []).slice().sort((a, b) => (a.start < b.start ? -1 : 1));
+    const lastWeek = R.filter((r) => r.days >= 3).pop();
+    R.forEach((r) => Object.keys(r.lines).forEach((k) => {
+      const key = lineKey(k); const l = r.lines[k]; const o = out[key] || (out[key] = { code: k, first: r.start, trips: 0, km: 0, cost: 0, week: 0 });
+      o.trips += l.trips || 0; o.km += l.km || 0; o.cost += l.cost || 0;
+    }));
+    if (lastWeek) Object.keys(lastWeek.lines).forEach((k) => { const o = out[lineKey(k)]; if (o) o.week = lastWeek.lines[k].cost || 0; });
+    Object.values(out).forEach((o) => { o.km = round2(o.km); o.cost = round2(o.cost); });
+    return { lines: out, lastWeek: lastWeek ? lastWeek.period : null, firstPaid: R.length ? R[0].start : null };
   }
 
   function totals(c) {
@@ -619,7 +720,7 @@
         : `This contract (effective ${r.effectiveFrom}) is older than the one already in the tracker (effective ${c.contract.effectiveFrom}), so nothing is changed.`);
       return plan;
     }
-    if (c.revenueReport && c.revenueReport.lineKm) { const tmp = { lines, revenueReport: c.revenueReport }; const got = fillFromReport(tmp); if (got.length) { lines.splice(0, lines.length, ...tmp.lines); plan.filledFromReport = got; } }
+    // RT kms are never filled in from the revenue report: a contract without them is flagged red in Needs attention
     const diff = lines.length ? lineDiff(c.lines, lines) : [];
     // Lines that didn't change keep the date they started
     lines.forEach((l) => { if (diff.some((d) => d.code === l.code)) return; const o = c.lines.find((x) => x.code === l.code); const f = o && lineFrom(c, o); if (f) l.from = f; else delete l.from; });
@@ -718,5 +819,6 @@
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS, MING_TOLERANCE,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
     latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport, sameBp, lineKey,
+    reportPeriod, normaliseReport, addReport, deriveRevenueReport, contractFromReport, payoutBetween, fyQuarter, lineHistory, overlapDays,
   };
 });

@@ -441,3 +441,14 @@ body.gated { overflow: hidden; }
 .team li { justify-content: space-between; }
 .team li span { display: flex; flex-direction: column; flex: 1; opacity: 1; font-size: 12px; }
 .team li span small { color: var(--mt); font-size: 11px; }
+
+/* Performance tab */
+#perf-q button { border: 0; background: transparent; color: var(--mt); padding: 6px 12px; border-radius: 7px; font: inherit; font-size: 12px; cursor: pointer; }
+#perf-q button.on { background: #2a323d; color: var(--tx); }
+#perf-q button small { color: var(--mt); font-size: 10.5px; margin-left: 4px; }
+.up { color: var(--g); } .dn { color: var(--rd); }
+#perf-tbl tr.clickrow { cursor: pointer; } #perf-tbl tr.clickrow:hover td, #perf-tbl tr.sel td { background: rgba(115,215,0,.05); }
+.track { height: 6px; background: #2a323d; border-radius: 4px; overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; margin-right: 8px; }
+.track .fill { display: block; height: 100%; }
+.chip { font-size: 11px; border-radius: 20px; padding: 2px 9px; border: 1px solid; white-space: nowrap; }
+.chip.ok { color: var(--g); border-color: rgba(115,215,0,.4); } .chip.warn { color: var(--am); border-color: rgba(240,180,41,.45); } .chip.bad { color: var(--rd); border-color: rgba(248,81,73,.45); }
