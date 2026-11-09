@@ -75,7 +75,8 @@
   const toRow = (c) => ({ id: c.id, bp_name: c.bpName, region: c.region || null, stage: c.stage || null, data: c, rev: c.updatedAt || new Date().toISOString() });
   async function list() {
     const rows = await call('/rest/v1/contracts?select=data&order=bp_name.asc');
-    return (rows || []).map((r) => r.data);
+    // Archived BPs (e.g. a duplicate that was merged into another) are kept in the database but not shown
+    return (rows || []).map((r) => r.data).filter((c) => c && !c.archived);
   }
   async function getOne(id) {
     const rows = await call('/rest/v1/contracts?select=data&id=eq.' + encodeURIComponent(id));
@@ -93,6 +94,14 @@
         { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: { data: next, rev: next.updatedAt, bp_name: next.bpName } });
     } catch (e) { throw friendly(e); }
     if (!rows || !rows.length) { const e = new Error('conflict'); e.conflict = true; throw e; }
+    return rows[0].data;
+  }
+  // Delete one BP (only the admin is allowed: the database refuses anyone else). Supabase keeps a copy of what was deleted.
+  async function remove(id) {
+    let rows;
+    try { rows = await call('/rest/v1/contracts?id=eq.' + encodeURIComponent(id), { method: 'DELETE', headers: { Prefer: 'return=representation' } }); }
+    catch (e) { throw friendly(e); }
+    if (!rows || !rows.length) throw new Error('Only the admin can delete a BP (or it was already deleted).');
     return rows[0].data;
   }
   // Many at once (used by the one-time import)
@@ -123,5 +132,5 @@
     return rows[0];
   }
 
-  root.SbStore = { configured, login, restore, logout, changePassword, profile, list, getOne, insert, update, upsertMany, team, setRole, setName, user: () => (session ? session.user : null) };
+  root.SbStore = { configured, login, restore, logout, changePassword, profile, list, getOne, insert, update, remove, upsertMany, team, setRole, setName, user: () => (session ? session.user : null) };
 })(typeof self !== 'undefined' ? self : this);

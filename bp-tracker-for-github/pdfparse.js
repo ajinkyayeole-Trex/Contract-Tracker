@@ -13,7 +13,32 @@
   const toNum = (s) => (s === null || s === undefined ? null : Number(String(s).replace(/,/g, '')));
   const round2 = (n) => Math.round(n * 100) / 100;
   const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
-  const title = (s) => clean(s).replace(/\w\S*/g, (w) => (w.length > 2 && w === w.toUpperCase() ? w[0] + w.slice(1).toLowerCase() : w[0].toUpperCase() + w.slice(1)));
+  // "SRI KVR TRAVELS" → "Sri Kvr Travels", "V.M.TRAVELS" → "V.M.Travels" (initials stay capitals)
+  const title = (s) => clean(s).replace(/[A-Za-z][^\s.]*/g, (w) => (w.length > 2 && w === w.toUpperCase() ? w[0] + w.slice(1).toLowerCase() : w[0].toUpperCase() + w.slice(1)));
+
+  // ---- BP name and entity name: always read from inside the contract, never from the file name ----
+  //   BP name: the partner named next to FlixBus in the signature block ("FlixBus India Private Limited  <BP>  represented by"),
+  //            or the Framework Agreement title ("Framework Agreement With <BP>")
+  //   Entity name: the billing name in the Commercial Annex ("Name of the Bus Partner: <entity>")
+  // Both are kept exactly as written. Only page furniture that lands inside the name (a DocuSign stamp, a page number) is removed.
+  const STAMP = /Docusign Envelope ID:\s*[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}/gi;
+  const letters = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
+  function cleanName(n) {
+    return clean(String(n || '').replace(STAMP, ' ').replace(/\s\d{1,3}(?=\s|$)/g, ' ')).replace(/^represented by\s*/i, '').replace(/[\s,;:–-]+$/, '').trim();
+  }
+  const nameSplit = (n) => String(n || '').split(/\s+[-–—]\s+|_/).map((x) => x.trim()).filter(Boolean);
+  function contractNames(text) {
+    let m; const count = {};
+    const sig = /FlixBus India Private Limited\s+(.{2,140}?)\s+represented by/gi;
+    while ((m = sig.exec(text))) { const n = cleanName(m[1]); if (n && letters(n).length >= 2 && !/flixbus/i.test(n)) count[n] = (count[n] || 0) + 1; }
+    const fw = /Framework Agreement With\s+(.{2,120}?)\s+Version/i.exec(text);
+    if (fw) { const n = cleanName(fw[1]); if (n && letters(n).length >= 2) count[n] = (count[n] || 0) + 1; }
+    const billing = /Name of the Bus Partner:\s*(.{2,120}?)\s+(?:Street|Address|Postal Code)\s*:/i.exec(text);
+    const entity = billing ? cleanName(billing[1]) : '';
+    const bp = Object.keys(count).sort((a, b) => count[b] - count[a])[0] || '';
+    const names = Object.keys(count).concat(entity ? [entity] : []).filter((n, i, a) => a.indexOf(n) === i);
+    return { bp, entity, names, count };
+  }
   const SOUTH = /bangalore|bengaluru|hyderabad|chennai|nellore|visakhapatnam|vizag|tirunelveli|madurai|coimbatore|kochi|cochin|mysore|mysuru|mangalore|mangaluru|vijayawada|tirupati|nagercoil|puducherry|pondicherry|ananthapur|kurnool|trichy|salem|hubli|belgaum|kerala|goa/i;
 
   const DOCS = [
@@ -73,17 +98,11 @@
     const text = clean(raw);
     const r = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], warnings: [], fileName: fileName || '' };
 
-    // BP name: the partner's name next to FlixBus in the signature block
-    const names = {};
-    const nre = /FlixBus India Private Limited\s+(.{2,90}?)\s+represented by/gi;
+    // BP name and entity name, as written inside the contract (never taken from the file name)
     let m;
-    while ((m = nre.exec(text))) { const n = clean(m[1]).replace(/^represented by\s*/i, ''); if (n && !/flixbus/i.test(n)) names[n] = (names[n] || 0) + 1; }
-    const best = Object.keys(names).sort((a, b) => names[b] - names[a])[0];
-    if (best) r.bpName = /[a-z]/.test(best) ? best : title(best);
-    else if (fileName) {
-      const f = /^(.+?)[\s_]+(Lines|Vehicles|Commercial|Framework|Addendum|Attachments)[\s_]+(Annex|Agreement)/i.exec(fileName);
-      if (f) r.bpName = title(f[1].replace(/_/g, ' '));
-    }
+    const cn = contractNames(text);
+    r.bpName = cn.bp || cn.entity; r.entityName = cn.entity; r.names = cn.names; r.nameCount = cn.count;
+    if (!r.bpName) r.warnings.push('The BP name is not written in this PDF. Type it in.');
 
     // Which documents are inside
     // Which of the six contract documents are inside (by their title page, or by the file name)
@@ -214,15 +233,23 @@
     const key = keyFn || ((n) => String(n || '').toLowerCase().replace(/['’`´]\s*s\b/g, '').replace(/[^a-z0-9]/g, ''));
     const same = sameFn || ((a, b) => key(a) === key(b));
     // Only combine PDFs for the same BP (the name may be written a little differently in each PDF); anything for another BP is left out
-    const main = (results.find((r) => r.bpName) || {}).bpName;
-    const skipped = main ? results.filter((r) => r.bpName && !same(r.bpName, main)) : [];
+    // One BP = PDFs whose names overlap (the Commercial Annex may say "Reliance Travels", the Lines Annex "Kishore Kumar_Reliance Travels")
+    const namesOf = (r) => (r.names && r.names.length ? r.names : [r.bpName]).filter(Boolean);
+    const partKeys = (n) => nameSplit(n).concat([n]).map(key).filter((k) => k.length >= 3);
+    const overlap = (a, b) => namesOf(a).some((x) => namesOf(b).some((y) => same(x, y) || partKeys(x).some((k) => partKeys(y).includes(k))));
+    const first = results.find((r) => r.bpName) || {};
+    const main = first.bpName;
+    const skipped = main ? results.filter((r) => r.bpName && r !== first && !overlap(r, first)) : [];
     results = results.filter((r) => !skipped.includes(r));
-    const out = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], docMap: {}, warnings: [], files: [], parts: [] };
+    const out = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], docMap: {}, warnings: [], files: [], parts: [], names: [], nameCount: {}, entityName: '' };
     const order = ['Merchant signature pending', 'Surya signature pending', 'Signed'];
     results.forEach((r) => {
       out.files.push(r.fileName);
+      namesOf(r).forEach((n) => { if (!out.names.includes(n)) out.names.push(n); });
+      Object.keys(r.nameCount || {}).forEach((n) => { out.nameCount[n] = (out.nameCount[n] || 0) + r.nameCount[n]; });
+      if (r.entityName && !out.entityName) out.entityName = r.entityName;
       // Each file's own documents, envelope and signatures (the tracker remembers them per document)
-      out.parts.push({ file: r.fileName, docKeys: Object.keys(r.docMap || {}), docMap: Object.assign({}, r.docMap || {}), envelopeId: r.envelopeId || null, signedBy: r.signedBy || null, signedOn: r.signedOn || null, effectiveFrom: r.effectiveFrom || null });
+      out.parts.push({ file: r.fileName, bpName: r.bpName || '', names: namesOf(r), docKeys: Object.keys(r.docMap || {}), docMap: Object.assign({}, r.docMap || {}), envelopeId: r.envelopeId || null, signedBy: r.signedBy || null, signedOn: r.signedOn || null, effectiveFrom: r.effectiveFrom || null });
       if (!out.bpName && r.bpName) out.bpName = r.bpName;
       r.lines.forEach((l) => { if (!out.lines.some((x) => x.code === l.code)) out.lines.push(l); });
       if (r.annualMileage) out.annualMileage = r.annualMileage;
@@ -236,6 +263,10 @@
       out.region = out.region || r.region;
       if (r.rcm === 'yes' || (r.rcm && !out.rcm)) { out.rcm = r.rcm; out.rcmClause = r.rcmClause; }
     });
+    // The BP name written most often across the PDFs (each document names the BP in its signature block)
+    const top = Object.keys(out.nameCount).sort((a, b) => out.nameCount[b] - out.nameCount[a])[0];
+    if (top) out.bpName = top;
+    if (!out.bpName && out.entityName) out.bpName = out.entityName;
     const all = results.flatMap((r) => r.warnings);
     out.warnings = all.filter((w, i) => all.indexOf(w) === i && !(/^No Lines Annex found/.test(w) && out.lines.length) && !(/^No Vehicles Annex annual mileage/.test(w) && out.annualMileage));
     skipped.forEach((r) => out.warnings.unshift(`“${r.fileName}” is for ${r.bpName}, not ${main}, so it was left out. Add it separately.`));

@@ -164,6 +164,10 @@
       if (state.demo) return C.updateContract(c, changes, state.me.name);
       return this.call('PATCH', 'api/contracts/' + c.id, { changes, updatedAt: c.updatedAt });
     },
+    async remove(c) {
+      if (state.mode === 'supabase') return SbStore.remove(c.id);
+      throw new Error('Deleting a BP works in the live tracker only.');
+    },
     async reject(c, body) {
       if (state.mode === 'supabase') return this.sbEdit(c, (cur, by) => C.rejectContract(cur, body, by));
       if (state.mode === 'github') return this.ghEdit(c, (cur, by) => C.rejectContract(cur, body, by), 'Reject ' + c.bpName);
@@ -1051,6 +1055,30 @@
   const blankLine = () => ({ code: '', rtKms: '', minG: '', rtAmt: '', calc: null });
 
   // ---------- BP drawer ----------
+  // ---------- Delete a BP (admin only, live tracker) ----------
+  const canDelete = () => state.mode === 'supabase' && state.me && state.me.role === 'admin';
+  async function deleteBp(id) {
+    const c = byId(id); if (!c || !canDelete()) return;
+    const n = (c.reports || []).length;
+    const msg = `Delete “${c.bpName}” from the tracker?\n\nThis removes it for everyone, with its lines and documents` +
+      (n ? `, and ${n} saved revenue reports (its payout history). If Finance keeps paying this BP, the weekly check will add it again.` : '.') +
+      '\n\nSupabase keeps a backup copy.';
+    if (!confirm(msg)) return;
+    try {
+      await api.remove(c);
+      state.contracts = state.contracts.filter((x) => x.id !== id);
+      state.openId = null; state.draft = null; $('#drawer').hidden = true;
+      renderAll(); toast(`${c.bpName} deleted`);
+    } catch (e) { toast(e.message, true); }
+  }
+  // Every attached document with its own envelope, signatures and file (newest version of each)
+  function attachedCard(c) {
+    const dd = (d) => (isoDay(d) ? new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+    const rows = C.DOC_TYPES.filter(([k]) => c.contractDocs[k]).map(([k, n]) => { const x = c.contractDocs[k];
+      const st = x.status === 'signed' ? `<span class="sp sp-s">Signed${x.signedOn ? ' ' + esc(dd(x.signedOn)) : ''}</span>` : `<span class="sp sp-p">${esc(C.DOC_STATUS[x.status] || x.status)}</span>`;
+      return `<tr><td><b>${esc(n)}</b>${k === 'lines' && x.effectiveFrom ? `<span class="sub">effective ${esc(dd(x.effectiveFrom))}</span>` : ''}</td><td>${st}</td><td class="mono">${x.envelopeId ? esc(String(x.envelopeId).slice(0, 8)) + '…' : '—'}</td><td class="sub" style="display:table-cell">${esc(x.file || '')}</td></tr>`; }).join('');
+    return `<div class="card"><div class="ct"><span>Attached documents</span><small>newest version of each</small></div><div class="tw"><table class="dt"><thead><tr><th>Document</th><th>Signature</th><th>DocuSign envelope</th><th>File</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }
   function openDrawer(id) {
     const c = byId(id); if (!c) return;
     state.openId = id; state.draft = clone(c);
@@ -1101,11 +1129,11 @@
       ${callout}
       ${c.pendingContract ? `<div class="callout amber"><h3>Revised contract out for signing</h3><p class="muted">The signed contract below stays in force. These changes are applied automatically when you upload the signed PDF:</p>
         <ul class="pend">${(c.pendingContract.changes || []).map((t) => `<li>${esc(t)}</li>`).join('')}</ul></div>` : ''}
-      ${c.contract ? `<div class="card"><div class="ct"><span>DocuSign envelope</span>${c.contract.status === 'Sent' ? `<span class="sp sp-p">${c.contract.signedBy && c.contract.signedBy.bp ? 'BP signed, waiting for Surya' : 'Sent, waiting for the BP'}</span>` : c.contract.envelopeId.length > 8 ? '<span class="sp sp-s">Signed in DocuSign</span>' : '<span class="sp sp-p">No DocuSign stamp</span>'}</div>
+      ${c.contractDocs && Object.keys(c.contractDocs).length ? attachedCard(c) : c.contract ? `<div class="card"><div class="ct"><span>DocuSign envelope</span>${c.contract.status === 'Sent' ? `<span class="sp sp-p">${c.contract.signedBy && c.contract.signedBy.bp ? 'BP signed, waiting for Surya' : 'Sent, waiting for the BP'}</span>` : c.contract.envelopeId.length > 8 ? '<span class="sp sp-s">Signed in DocuSign</span>' : '<span class="sp sp-p">No DocuSign stamp</span>'}</div>
         <div class="fgrid ro-grid"><div><span class="kl">Documents</span>${esc(c.contract.documents)}</div><div><span class="kl">Effective from</span>${c.contract.effectiveFrom ? esc(new Date(c.contract.effectiveFrom).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })) : '—'}</div>
         <div><span class="kl">DocuSign envelope</span><span class="mono">${esc(c.contract.envelopeId)}</span></div>
         ${c.contract.signedBy ? `<div><span class="kl">Signatures</span>BP: ${c.contract.signedBy.bp ? '✓ ' + esc(c.contract.signedBy.bp) : '⏳ not yet'} · Surya: ${c.contract.signedBy.surya ? '✓ ' + esc(c.contract.signedBy.surya) : '⏳ not yet'}</div>` : ''}<div><span class="kl">Source</span>${esc(c.contract.file)}</div></div></div>` : ''}
-      <div class="card"><div class="ct"><span>Contract documents</span>${docBadge(d)}</div>
+      <div class="card"><div class="ct"><span>Contract documents</span><span class="fs">${ro ? '' : '<button type="button" class="gh-btn sm" data-attach-pdf>📎 Add contract PDF</button>'}${docBadge(d)}</span></div>
         <label class="chk"><input type="checkbox" data-bptype ${d.bpType === 'existing' ? 'checked' : ''} ${dis}> <b>Existing BP?</b> <span>Moved to a new route: only the Lines Annex and Vehicles Annex need signing.</span></label>
         ${!d.bpType ? `<p class="sn" style="margin:4px 0">Not decided yet. Tick the box for an existing BP, or <button type="button" class="link-btn" data-bpnew ${dis}>mark as a new BP</button> (all 6 documents).</p>` : ''}
         ${docList(d, !ro)}
@@ -1115,12 +1143,14 @@
         ${linesTable(d.lines, 'd', ro, { fallbackFrom: c.contract && isoDay(c.contract.effectiveFrom) ? c.contract.effectiveFrom : '', past: c.pastLines || [] })}</div>
       <div class="card"><div class="ct"><span>Details</span></div><div class="fgrid">
         <label>BP name<input class="ipt" data-df="bpName" value="${esc(d.bpName)}" ${dis}></label>
+        ${c.entityName ? `<div><span class="kl">Entity name (from the Commercial Annex)</span>${esc(c.entityName)}</div>` : ''}
         <label>Owner<input class="ipt" data-df="owner" value="${esc(d.owner)}" ${dis} placeholder="Who is handling this BP"></label>
         <label>Annual mileage (km) – Vehicles Annex<input class="ipt" data-df="annualMileage" inputmode="numeric" value="${d.annualMileage ?? ''}" ${dis} placeholder="e.g. 311563"></label>
         <label class="full">Comments<textarea class="ipt" data-df="comments" rows="2" ${dis}>${esc(d.comments)}</textarea></label>
       </div></div>
       <div class="card"><div class="ct"><span>History</span></div>
         <ul class="hist">${c.history.slice().reverse().map((h) => `<li><time>${when(h.at)}, ${esc(h.by)}</time>${esc(h.text)}</li>`).join('')}</ul></div>
+      ${canDelete() ? `<div class="card" style="border-color:rgba(248,81,73,.35)"><div class="ct"><span>Delete this BP</span><button type="button" class="rd-btn" id="btn-delete-bp">🗑 Delete</button></div><p class="sn" style="margin:0">Removes it from the tracker for everyone, for example a duplicate entry. Only admins can do this. Supabase keeps a backup copy.</p></div>` : ''}
       ${ro ? '' : `<div class="savebar"><span id="dirty-note"></span><button class="gh-btn" id="btn-discard">Discard</button><button class="svb" id="btn-save">Save changes</button></div>`}`;
     updateDirty();
   }
@@ -1155,14 +1185,33 @@
   // ---------- Add contract (type it in, or attach the contract PDF to fill it in) ----------
   let newLines = [];
   let pdf = null; // { r: parsed PDF, opts, plan, files }
+  let pdfTarget = null; // BP picked by hand: the PDFs are added to it, whatever name is written in them
   const fld = (n) => $('[name=' + n + ']', $('#form-new'));
   function openNew() {
     const f = $('#form-new'); f.reset();
     fld('region').innerHTML = C.OPTIONS.region.map((o) => `<option${o === state.scope ? ' selected' : ''}>${esc(o)}</option>`).join('');
     fld('stage').innerHTML = C.STAGES.map((o) => `<option>${esc(o)}</option>`).join('');
     fld('owner').value = myName();
+    pdfTarget = null;
     newLines = [blankLine()]; clearPdf(); $('#new-error').textContent = ''; simDismissed = ''; checkSimilar();
     $('#dlg-new').showModal(); fld('bpName').focus();
+  }
+  // Opened from a BP: attach its pending documents (only those are needed; the rest is kept)
+  function openNewFor(id) {
+    if (!byId(id)) return openNew();
+    openNew(); fillTarget(id);
+  }
+  function fillTarget(id) {
+    const c = byId(id); pdfTarget = id;
+    fld('bpName').value = c.bpName; fld('region').value = c.region || 'N/W'; fld('owner').value = c.owner || myName();
+    fld('stage').innerHTML = C.ALL_STAGES.map((o) => `<option>${esc(o)}</option>`).join(''); fld('stage').value = c.stage;
+    fld('annualMileage').value = c.annualMileage || ''; fld('comments').value = c.comments || '';
+    newLines = c.lines.map((l) => Object.assign({}, l)); drawNewLines();
+    $('#pdf-banner').hidden = false;
+    $('#pdf-banner').innerHTML = `<div class="bar upd"><b>↻ Adding documents to ${esc(c.bpName)}</b><ul><li>Attach only the documents that are pending. Everything already attached is kept.</li><li>The PDFs are added to ${esc(c.bpName)} even if the name in them is written differently.</li></ul></div>`;
+    $('#btn-new-submit').textContent = 'Update ' + c.bpName;
+    $('#new-existing').checked = c.bpType === 'existing';
+    drawDocPreview(); checkSimilar();
   }
   // Similar BP names: checked while typing, and after a PDF fills the name in
   let simDismissed = '';
@@ -1174,11 +1223,11 @@
     const dup = C.findDuplicate(state.contracts, name);
     const hits = dup ? [{ c: dup, score: 1 }] : C.similarBps(state.contracts, name);
     if (!hits.length) { box.hidden = true; return; }
-    const row = (h) => `<div class="match"><b>${esc(h.c.bpName)}</b><span class="m">${esc(h.c.region || 'No region')} · ${h.c.lines.length} line${h.c.lines.length === 1 ? '' : 's'} · ${Math.round(h.score * 100)}% match</span>${stagePill(h.c.stage)}<button type="button" class="gh-btn sm" data-sim-open="${esc(h.c.id)}">Open it</button></div>`;
+    const row = (h) => `<div class="match"><b>${esc(h.c.bpName)}</b><span class="m">${esc(h.c.region || 'No region')} · ${h.c.lines.length} line${h.c.lines.length === 1 ? '' : 's'} · ${Math.round(h.score * 100)}% match</span>${stagePill(h.c.stage)}${pdf ? `<button type="button" class="add-btn sm" data-sim-use="${esc(h.c.id)}">Add this PDF to ${esc(h.c.bpName)}</button>` : ''}<button type="button" class="gh-btn sm" data-sim-open="${esc(h.c.id)}">Open it</button></div>`;
     box.className = 'similar' + (dup ? ' block' : '');
     box.innerHTML = dup
       ? `<div class="t">✕ This BP is already in the tracker</div>${row(hits[0])}<div class="foot"><span>Open it to make changes, or attach the new contract PDF there.</span></div>`
-      : `<div class="t">⚠ This looks like a BP that is already in the tracker</div>${hits.map(row).join('')}<div class="foot"><span>Adding a new Lines Annex? Open it and attach the PDF there.</span><button type="button" class="link-btn" data-sim-no>No, it's a different BP</button></div>`;
+      : `<div class="t">⚠ This looks like a BP that is already in the tracker</div>${hits.map(row).join('')}<div class="foot"><span>${pdf ? 'Is this PDF for that BP? Click “Add this PDF to …” and it updates that BP instead of adding a new one.' : 'Adding a new Lines Annex? Open it and click “📎 Add contract PDF” there.'}</span><button type="button" class="link-btn" data-sim-no>No, it's a different BP</button></div>`;
     box.hidden = false;
   }
   const myName = () => (state.me.name && !/preview user|unknown|this browser/i.test(state.me.name) ? state.me.name : '');
@@ -1233,7 +1282,7 @@
     try {
       const parsed = (pdf ? pdf.parsed : []).slice();
       for (const f of files) parsed.push(await PdfParse.readPdf(f));
-      const opts = pdf ? pdf.opts : {};
+      const opts = pdf ? pdf.opts : pdfTarget ? { targetId: pdfTarget } : {};
       pdf = { parsed, r: PdfParse.merge(parsed, C.nameKey, C.sameBp), opts };
       fillFromPdf();
     } catch (err) {
@@ -1278,6 +1327,8 @@
     items.push('Contract stage: <b>' + esc(p.signed ? 'Signed' : (p.patch && p.patch.stage) || (p.body && p.body.stage) || (p.bp && p.bp.stage) || '') + '</b>' + (sbx.source ? '' : ' (' + esc(p.signLabel) + ')'));
     if (p.needsAnswer) items.push('Is this contract signed by both the BP and Surya? <button type="button" class="gh-btn sm" data-signed="yes">Yes, signed</button> <button type="button" class="gh-btn sm" data-signed="no">Not yet</button>');
     let cls, title;
+    // The names as written inside the contract (never taken from the file name)
+    if (r.bpName) items.push(`BP name in the contract: <b>${esc(r.bpName)}</b>${r.entityName && r.entityName !== r.bpName ? ` · Entity name (Commercial Annex): <b>${esc(r.entityName)}</b>` : ''}`);
     if (!c) {
       cls = 'new'; title = `✓ New BP – read from “${esc(r.files.join(', '))}”`;
       items.push(`${p.lines.length} line${p.lines.length === 1 ? '' : 's'}${r.annualMileage ? ', annual mileage ' + fmt(r.annualMileage, 0) + ' km (Vehicles Annex Art. 2.1)' : ''}. Check the green fields, change anything you need, then click Add.`);
@@ -1321,12 +1372,15 @@
         const ch = Object.assign({}, body);
         // Keep every document attached before (the contract record lists them all) and remember each one separately
         if (p.kind !== 'none') { ch.contract = p.patch && p.patch.contract ? p.patch.contract : p.contractAfter || p.contract; if (p.contractDocsAfter) ch.contractDocs = p.contractDocsAfter; }
+        if (p.patch && p.patch.aliases) ch.aliases = p.patch.aliases;
+        if (p.patch && p.patch.entityName) ch.entityName = p.patch.entityName;
         if (c.pendingContract) ch.pendingContract = null;
         ch.historyNote = 'Updated from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.' + (p.changes.length ? ' ' + p.changes.join('; ') : '');
         saved = await api.update(c, ch);
         if (saved.updatedAt === c.updatedAt) { $('#new-error').textContent = 'Nothing changed.'; return; }
       } else {
-        if (p) { body.contract = p.contract; body.docsReceived = true; if (p.body && p.body.contractDocs) body.contractDocs = p.body.contractDocs; body.historyNote = 'Added from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.'; }
+        if (pdfTarget) { $('#new-error').textContent = 'Attach the contract PDF for ' + ((byId(pdfTarget) || {}).bpName || 'this BP') + ' first.'; return; }
+        if (p) { body.contract = p.contract; body.docsReceived = true; if (p.body && p.body.contractDocs) body.contractDocs = p.body.contractDocs; if (p.body && p.body.aliases && p.body.aliases.length) body.aliases = p.body.aliases; if (p.body && p.body.entityName) body.entityName = p.body.entityName; body.historyNote = 'Added from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.'; }
         saved = await api.create(body);
       }
       upsert(saved); $('#dlg-new').close(); renderAll(); openDrawer(saved.id);
@@ -1470,7 +1524,14 @@
       if (e.target.closest('#btn-save')) return saveDraft();
       if (e.target.closest('#btn-discard')) { state.draft = clone(byId(state.openId)); renderDrawer(); return; }
       if (e.target.closest('#btn-reject')) return openReject(state.openId);
+      if (e.target.closest('#btn-delete-bp')) return deleteBp(state.openId);
       if (e.target.closest('[data-bpnew]')) { state.draft.bpType = 'new'; renderDrawer(); return; }
+      // Add PDFs to THIS BP, whatever name is written in them
+      if (e.target.closest('[data-attach-pdf]')) {
+        const id = state.openId;
+        if (isDirty() && !confirm('You have changes that are not saved. Discard them and add the PDF?')) return;
+        state.openId = null; state.draft = null; $('#drawer').hidden = true; openNewFor(id); return;
+      }
     });
     $('#drawer').addEventListener('change', (e) => {
       const el = e.target;
@@ -1507,6 +1568,8 @@
     $('#bp-similar').addEventListener('click', (e) => {
       const o = e.target.closest('[data-sim-open]');
       if (o) { dlgNew.close(); openDrawer(o.dataset.simOpen); return; }
+      const u = e.target.closest('[data-sim-use]');
+      if (u && pdf) { pdf.opts.targetId = u.dataset.simUse; delete pdf.opts.forceNew; pdfTarget = u.dataset.simUse; fillFromPdf(); return; }
       if (e.target.closest('[data-sim-no]')) { simDismissed = C.nameKey(fld('bpName').value); checkSimilar(); }
     });
     $('#btn-add-line').addEventListener('click', () => { newLines.push(blankLine()); drawNewLines(); $$('[data-lines="n"] [data-k="code"]').pop().focus(); });
@@ -1517,7 +1580,7 @@
     });
     dlgNew.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', () => dlgNew.close()));
     $('#pdf-pick').addEventListener('click', () => $('#pdf-file').click());
-    $('#pdf-remove').addEventListener('click', () => { const f = $('#form-new'); const keepOwner = fld('owner').value; f.reset(); fld('owner').value = keepOwner; fld('stage').innerHTML = C.STAGES.map((o) => `<option>${esc(o)}</option>`).join(''); newLines = [blankLine()]; clearPdf(); });
+    $('#pdf-remove').addEventListener('click', () => { if (pdfTarget) { const t = pdfTarget; clearPdf(); fillTarget(t); return; } const f = $('#form-new'); const keepOwner = fld('owner').value; f.reset(); fld('owner').value = keepOwner; fld('stage').innerHTML = C.STAGES.map((o) => `<option>${esc(o)}</option>`).join(''); newLines = [blankLine()]; clearPdf(); });
     $('#pdf-file').addEventListener('change', (e) => { attachPdfs(e.target.files); e.target.value = ''; });
     const att = $('#pdf-attach');
     ['dragenter', 'dragover'].forEach((t) => att.addEventListener(t, (e) => { e.preventDefault(); att.classList.add('over'); }));
@@ -1525,7 +1588,7 @@
     att.addEventListener('drop', (e) => attachPdfs(e.dataTransfer.files));
     $('#pdf-banner').addEventListener('click', (e) => {
       const s = e.target.closest('[data-signed]'); if (s && pdf) { pdf.opts.signedAnswer = s.dataset.signed === 'yes'; fillFromPdf(); return; }
-      if (e.target.closest('#pdf-not-same') && pdf) { pdf.opts.forceNew = true; simDismissed = C.nameKey(pdf.r.bpName); fillFromPdf(); }
+      if (e.target.closest('#pdf-not-same') && pdf) { pdf.opts.forceNew = true; delete pdf.opts.targetId; pdfTarget = null; simDismissed = C.nameKey(pdf.r.bpName); fillFromPdf(); }
     });
     // Typing over a field that came from the PDF removes its "from PDF" tag
     $('#form-new').addEventListener('input', (e) => { const n = e.target.name; if (n && $(`[data-tag="${n}"]`)) setTag(n, false); if (n === 'bpName' && pdf && pdf.plan && !pdf.plan.bp) $('#btn-new-submit').textContent = 'Add ' + (e.target.value || 'contract'); });

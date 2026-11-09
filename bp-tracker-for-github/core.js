@@ -57,6 +57,8 @@
     rcm: 'RCM clause in Commercial Annex',
     rcmClause: 'RCM clause number',
     contractDocs: 'Attached documents',
+    aliases: 'Other names of this BP',
+    entityName: 'Entity name (Commercial Annex)',
   };
   // Saved, but without its own line in the history (the "Contract documents" lines already say what changed)
   const QUIET_FIELDS = ['contractDocs'];
@@ -150,6 +152,18 @@
       .map((c) => ({ c, score: Math.max(...[c.bpName].concat(c.aliases || []).map((a) => nameScore(name, a))) }))
       .filter((x) => x.score >= 0.8).sort((a, b) => b.score - a.score).slice(0, 2);
   }
+  // One owner, several names: contract PDFs often write the BP as "<trading name> - <legal entity>" or "<firm> - <owner>":
+  // "Madurai Radha Travels - RVN ENTERPRISES", "V.M.TRAVELS - SYED AKBAR SYED NASEER", "RVN Enterprises (Madurai Radha Travels)".
+  // Every part (split at " - ", "_" and brackets) is compared with every part of the tracker's names and aliases.
+  // Used only for contract PDFs, and only when exactly one BP fits (the form then shows "It's a different BP" to undo it).
+  const nameParts = (n) => String(n || '').split(/\s+[-–—]\s+|_|[()]/).map((x) => x.trim()).filter(Boolean);
+  function matchNamePart(list, name) {
+    const keys = nameParts(name).map(nameKey).filter((k) => k.length >= 2);
+    if (!keys.length) return null;
+    const hits = list.filter((c) => !c.archived && [c.bpName].concat(c.aliases || []).some((a) => nameParts(a).concat([a]).some((x) => keys.includes(nameKey(x)))));
+    return hits.length === 1 ? hits[0] : null;
+  }
+  const matchFirmPart = matchNamePart;
   // Line codes that appear under more than one BP
   function duplicateLines(list) {
     const seen = {};
@@ -221,6 +235,7 @@
     if (field === 'pendingContract') return v ? 'yes' + (v.contract && v.contract.envelopeId && v.contract.envelopeId.length > 8 ? ' (envelope ' + v.contract.envelopeId.slice(0, 8) + '…)' : '') : 'none';
     if (field === 'contract') return v ? (v.documents || 'PDF') + (v.envelopeId && v.envelopeId.length > 8 ? ', envelope ' + v.envelopeId.slice(0, 8) + '…' : '') : '(empty)';
     if (field === 'lines') return (v || []).map((l) => l.code || '?').join(', ') || 'none';
+    if (field === 'aliases') return (v || []).join(', ') || 'none';
     if (typeof v === 'boolean') return v ? 'Yes' : 'No';
     return v === '' || v === null || v === undefined ? '(empty)' : String(v);
   }
@@ -727,7 +742,18 @@
   function planFromPdf(list, r, opts) {
     opts = opts || {};
     const target = !opts.forceNew && opts.targetId ? list.find((x) => x.id === opts.targetId) : null;
-    const m = opts.forceNew ? null : target ? { c: target, how: 'chosen' } : matchBp(list, r.bpName);
+    // Which BP: the one picked by hand, else the name in the PDF, else the name in any of the attached PDFs
+    // (a Vehicles Annex may say "V.M.TRAVELS - SYED AKBAR SYED NASEER" while the Lines Annex says "V.M. Travels"),
+    // else the firm part of the name (before " - "), when exactly one BP fits
+    let m = null;
+    if (!opts.forceNew) {
+      // Every name the PDFs give this BP: the entity name, and the names as written (e.g. with the owner: "Kishore Kumar_Reliance Travels")
+      const allNames = [r.bpName, r.entityName].concat(r.names || [], ...(r.parts || []).map((p) => [p.bpName].concat(p.names || []))).filter((n, i, a) => n && a.indexOf(n) === i);
+      if (target) m = { c: target, how: 'chosen' };
+      if (!m) m = matchBp(list, r.bpName);
+      if (!m) allNames.some((n) => { const x = matchBp(list, n); if (x) m = { c: x.c, how: 'similar' }; return !!x; });
+      if (!m) allNames.some((n) => { const x = matchNamePart(list, n); if (x) m = { c: x, how: 'similar' }; return !!x; });
+    }
     const c = m ? m.c : null;
     const lines = (r.lines || []).map((l) => normaliseLine({ code: l.code, route: l.route, rtKms: l.rtKms, minG: l.minG, rtAmt: l.rtAmt, from: r.effectiveFrom || null,
       calc: l.kmsWorkedOut ? 'rtKms' : l.amtWorkedOut ? 'rtAmt' : null, printed: !l.kmsWorkedOut && !l.amtWorkedOut && l.rtKms != null && l.minG != null && l.rtAmt != null, source: 'pdf' }));
@@ -763,7 +789,8 @@
       plan.changes = summary;
       plan.docsAfter = docMap;
       plan.body = { bpName: r.bpName, region: r.region || 'N/W', stage: flowStage, lines, annualMileage: r.annualMileage || null, contract,
-        bpType, docs: docMap, rcm: r.rcm || null, rcmClause: r.rcmClause || '', docsReceived: true, contractDocs: uploadDocs(r, docMap), historyNote: 'Added from contract PDF ' + contract.file + '. ' + signLabel + '.' };
+        bpType, docs: docMap, rcm: r.rcm || null, rcmClause: r.rcmClause || '', docsReceived: true, contractDocs: uploadDocs(r, docMap),
+        aliases: (r.names || []).filter((n) => n && nameKey(n) !== nameKey(r.bpName)), entityName: r.entityName || '', historyNote: 'Added from contract PDF ' + contract.file + '. ' + signLabel + '.' };
       if (!r.bpName) plan.notes.push('The BP name was not found in the PDF: type it in.');
       return plan;
     }
@@ -815,6 +842,11 @@
     plan.unchanged = lines.length ? lines.filter((l) => !diff.some((d) => d.code === l.code)).map((l) => l.code) : [];
     if (mileage) text.push(`Annual mileage: ${mileage.from ? fmtN(mileage.from) + ' km' : 'empty'} → ${fmtN(mileage.to)} km`);
     const patch = {};
+    // The names written in these PDFs are saved as other names of this BP, so the next PDF is recognised straight away
+    const pdfNames = [r.bpName].concat(r.names || [], ...(r.parts || []).map((p) => [p.bpName].concat(p.names || []))).map((n) => String(n || '').trim()).filter((n, i, a) => n && a.indexOf(n) === i);
+    const newNames = pdfNames.filter((n) => !findDuplicate([c], n));
+    if (newNames.length && !opts.forceNew) { patch.aliases = (c.aliases || []).concat(newNames); plan.newNames = newNames; }
+    if (r.entityName && r.entityName !== c.entityName) patch.entityName = r.entityName;
     // Documents: a changed Lines Annex / Vehicles Annex replaces the old one's status; other documents only improve
     const replaceKeys = [].concat(diff.length ? ['lines'] : [], mileage ? ['vehicles'] : []);
     const docsAfter = mergeDocs(c.docs, docMap, replaceKeys);
@@ -869,12 +901,13 @@
     else if (!c.contract || c.contract.envelopeId !== contract.envelopeId) {
       if (contract.envelopeId.length > 8 || !c.contract) {
         patch.contract = plan.contractAfter;
-        text.push('Lines, mileage and stage already match. Contract document recorded: ' + contract.documents + (contract.envelopeId.length > 8 ? ', envelope ' + contract.envelopeId.slice(0, 8) + '…' : ''));
+        text.push('Lines, mileage and stage already match. Contract document recorded: ' + ((r.docs || []).join(', ') || contract.documents) + (contract.envelopeId.length > 8 ? ', envelope ' + contract.envelopeId.slice(0, 8) + '…' : ''));
       }
     }
     text.push(...docText);
     plan.changes = text;
-    if (!Object.keys(patch).filter((k) => k !== 'contractDocs').length) { plan.kind = 'none'; plan.notes.push('Everything in this PDF already matches the tracker. Nothing to update.'); return plan; }
+    if (plan.newNames) text.push('Saved as another name of ' + c.bpName + ': ' + plan.newNames.join(', '));
+    if (!Object.keys(patch).filter((k) => !['contractDocs', 'aliases', 'entityName'].includes(k)).length) { plan.kind = 'none'; plan.notes.push('Everything in this PDF already matches the tracker. Nothing to update.'); return plan; }
     patch.historyNote = 'Updated from contract PDF ' + contract.file + '. ' + signLabel + '. ' + text.join('; ');
     plan.patch = patch;
     return plan;
@@ -923,6 +956,6 @@
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS, MING_TOLERANCE,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
     latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport, sameBp, lineKey,
-    reportPeriod, normaliseReport, knownDocs, mergeContract, addReport, deriveRevenueReport, contractFromReport, payoutBetween, fyQuarter, lineHistory, overlapDays,
+    reportPeriod, normaliseReport, knownDocs, mergeContract, matchFirmPart, matchNamePart, addReport, deriveRevenueReport, contractFromReport, payoutBetween, fyQuarter, lineHistory, overlapDays,
   };
 });
