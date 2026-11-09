@@ -217,10 +217,12 @@
     const main = (results.find((r) => r.bpName) || {}).bpName;
     const skipped = main ? results.filter((r) => r.bpName && !same(r.bpName, main)) : [];
     results = results.filter((r) => !skipped.includes(r));
-    const out = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], docMap: {}, warnings: [], files: [] };
+    const out = { bpName: '', lines: [], annualMileage: null, effectiveFrom: null, envelopeId: null, envelopeStatus: null, stage: null, signedOn: null, region: null, docs: [], docMap: {}, warnings: [], files: [], parts: [] };
     const order = ['Merchant signature pending', 'Surya signature pending', 'Signed'];
     results.forEach((r) => {
       out.files.push(r.fileName);
+      // Each file's own documents, envelope and signatures (the tracker remembers them per document)
+      out.parts.push({ file: r.fileName, docKeys: Object.keys(r.docMap || {}), docMap: Object.assign({}, r.docMap || {}), envelopeId: r.envelopeId || null, signedBy: r.signedBy || null, signedOn: r.signedOn || null, effectiveFrom: r.effectiveFrom || null });
       if (!out.bpName && r.bpName) out.bpName = r.bpName;
       r.lines.forEach((l) => { if (!out.lines.some((x) => x.code === l.code)) out.lines.push(l); });
       if (r.annualMileage) out.annualMileage = r.annualMileage;

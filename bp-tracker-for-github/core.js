@@ -56,7 +56,10 @@
     docs: 'Contract documents',
     rcm: 'RCM clause in Commercial Annex',
     rcmClause: 'RCM clause number',
+    contractDocs: 'Attached documents',
   };
+  // Saved, but without its own line in the history (the "Contract documents" lines already say what changed)
+  const QUIET_FIELDS = ['contractDocs'];
 
   // The six contract documents. A new BP signs all six; an existing BP moved to a new route signs only the Lines and Vehicles Annex.
   const DOC_TYPES = [
@@ -272,6 +275,7 @@
       if (sameValue(c[k], changes[k])) return;
       changed = true;
       next[k] = changes[k];
+      if (QUIET_FIELDS.includes(k)) return;
       next.history = (next.history || []).concat([{
         at: now, by: user,
         text: FIELDS[k] + ': ' + display(k, c[k]) + ' → ' + display(k, changes[k]),
@@ -659,16 +663,78 @@
 
   // Decide what a contract PDF means for the tracker.
   // r = PdfParse result; signedAnswer = the user's answer when the PDF has no DocuSign stamp (true / false / undefined)
+  // ---- What is already attached, per document (so adding the pending documents later never needs the earlier ones again) ----
+  const latestDate = (...ds) => ds.filter(isDate).sort().pop() || null;
+  const docName = (k) => (DOC_TYPES.find((d) => d[0] === k) || [k, k])[1];
+  // c.contractDocs = { lines: { status, file, envelopeId, signedOn, effectiveFrom, at }, vehicles: {…}, … }.
+  // BPs saved before this existed: worked out from the one contract record + the documents checklist.
+  function knownDocs(c) {
+    const out = {}; const saved = (c && c.contractDocs) || {};
+    const con = c && c.contract; const docs = (c && c.docs) || {};
+    const names = con ? String(con.documents || '').toLowerCase() : '';
+    DOC_TYPES.forEach(([k, n]) => {
+      if (saved[k]) { out[k] = Object.assign({}, saved[k]); return; }
+      const inCon = con && names.includes(n.toLowerCase());
+      if (!inCon && !(docs[k] && docs[k] !== 'missing')) return;
+      out[k] = { status: docs[k] || 'copy', file: inCon ? con.file || '' : '', envelopeId: inCon && con.envelopeId && con.envelopeId.length > 8 ? con.envelopeId : null,
+        signedOn: inCon ? latestDate(con.signedBy && con.signedBy.bp, con.signedBy && con.signedBy.surya) : null, effectiveFrom: inCon && k === 'lines' ? con.effectiveFrom || null : null, earlier: true };
+    });
+    return out;
+  }
+  // The documents in this upload, each with its own file, envelope and signing date
+  function uploadDocs(r, docMap) {
+    const parts = r.parts && r.parts.length ? r.parts : [{ file: (r.files || []).join(', '), docKeys: Object.keys(r.docMap || {}), envelopeId: r.envelopeId, signedBy: r.signedBy, signedOn: r.signedOn, effectiveFrom: r.effectiveFrom }];
+    const out = {};
+    parts.forEach((p) => (p.docKeys || []).forEach((k) => {
+      if (!docMap[k]) return;
+      const sb = p.signedBy || {};
+      const o = { status: docMap[k], file: p.file || '', envelopeId: p.envelopeId || null, signedOn: latestDate(sb.bp, sb.surya, p.signedOn), effectiveFrom: k === 'lines' ? p.effectiveFrom || null : null };
+      if (!out[k] || (DOC_RANK[o.status] || 0) > (DOC_RANK[out[k].status] || 0)) out[k] = o;
+    }));
+    return out;
+  }
+  // Is this upload's document older than the one already in the tracker? Signing date first, then (Lines Annex) the effective date.
+  function olderDoc(k, inc, was, revised) {
+    if (!was) return false;
+    const a = inc.signedOn, b = was.signedOn;
+    if (a && b && a !== b) return a < b;
+    if (k === 'lines' && inc.effectiveFrom && was.effectiveFrom && inc.effectiveFrom !== was.effectiveFrom) return inc.effectiveFrom < was.effectiveFrom;
+    // A less-signed copy of a document the tracker already has signed (and nothing in it changed) is an earlier version too
+    return !revised && (DOC_RANK[inc.status] || 0) < (DOC_RANK[was.status] || 0);
+  }
+  // One contract record listing every document attached so far (the newest version of each)
+  function mergeContract(old, add, replaced, hasLines) {
+    if (!old) return add;
+    const split = (s) => String(s || '').split(/\s*[;,]\s*(?=[A-Z])/).map((x) => x.trim()).filter((x) => x && x !== 'PDF');
+    const typeOf = (x) => { const t = DOC_TYPES.find(([, n]) => x.toLowerCase().includes(n.toLowerCase().split(' ')[0].toLowerCase()) && x.toLowerCase().includes((n.split(' ')[1] || '').toLowerCase())); return t ? t[0] : null; };
+    const oldDocs = split(old.documents).filter((x) => !replaced.includes(typeOf(x)));
+    const docs = oldDocs.concat(split(add.documents).filter((x) => !oldDocs.some((y) => typeOf(y) && typeOf(y) === typeOf(x))));
+    const order = (x) => { const t = typeOf(x); const i = DOC_TYPES.findIndex((d) => d[0] === t); return i < 0 ? 99 : i; };
+    docs.sort((a, b) => order(a) - order(b));
+    const fileType = (f) => { const t = DOC_TYPES.find(([, n]) => f.toLowerCase().includes(n.toLowerCase())); return t ? t[0] : null; };
+    const oldFiles = String(old.file || '').split(/,\s*(?=\S)/).map((x) => x.trim()).filter(Boolean);
+    const newFiles = String(add.file || '').split(/,\s*(?=\S)/).map((x) => x.trim()).filter(Boolean);
+    const files = oldFiles.filter((f) => !replaced.includes(fileType(f)) && !newFiles.includes(f)).concat(newFiles);
+    const stamped = add.envelopeId && add.envelopeId.length > 8;
+    return Object.assign({}, old, {
+      documents: docs.join(', ') || add.documents, file: files.join(', '),
+      envelopeId: stamped ? add.envelopeId : old.envelopeId || add.envelopeId,
+      effectiveFrom: hasLines ? add.effectiveFrom || old.effectiveFrom || '' : old.effectiveFrom || add.effectiveFrom || '',
+      status: add.status || old.status || '', signedBy: stamped || !old.signedBy ? add.signedBy : old.signedBy,
+    });
+  }
+
   function planFromPdf(list, r, opts) {
     opts = opts || {};
-    const m = opts.forceNew ? null : matchBp(list, r.bpName);
+    const target = !opts.forceNew && opts.targetId ? list.find((x) => x.id === opts.targetId) : null;
+    const m = opts.forceNew ? null : target ? { c: target, how: 'chosen' } : matchBp(list, r.bpName);
     const c = m ? m.c : null;
     const lines = (r.lines || []).map((l) => normaliseLine({ code: l.code, route: l.route, rtKms: l.rtKms, minG: l.minG, rtAmt: l.rtAmt, from: r.effectiveFrom || null,
       calc: l.kmsWorkedOut ? 'rtKms' : l.amtWorkedOut ? 'rtAmt' : null, printed: !l.kmsWorkedOut && !l.amtWorkedOut && l.rtKms != null && l.minG != null && l.rtAmt != null, source: 'pdf' }));
     const stamped = !!r.envelopeId;
-    const signed = r.stage === 'Signed' || (!stamped && opts.signedAnswer === true);
+    let signed = r.stage === 'Signed' || (!stamped && opts.signedAnswer === true);
     const needsAnswer = !stamped && opts.signedAnswer === undefined;
-    const flowStage = signed ? 'Signed' : r.stage || 'Merchant signature pending';
+    let flowStage = signed ? 'Signed' : r.stage || 'Merchant signature pending';
     const sb = r.signedBy || {};
     const contract = { envelopeId: r.envelopeId || '—', documents: (r.docs || []).filter((d) => d !== 'Commercial Annex').join(', ') || 'PDF',
       effectiveFrom: r.effectiveFrom || '', file: (r.files || []).join(', '), status: signed ? 'Completed' : r.envelopeStatus || '',
@@ -697,34 +763,53 @@
       plan.changes = summary;
       plan.docsAfter = docMap;
       plan.body = { bpName: r.bpName, region: r.region || 'N/W', stage: flowStage, lines, annualMileage: r.annualMileage || null, contract,
-        bpType, docs: docMap, rcm: r.rcm || null, rcmClause: r.rcmClause || '', docsReceived: true, historyNote: 'Added from contract PDF ' + contract.file + '. ' + signLabel + '.' };
+        bpType, docs: docMap, rcm: r.rcm || null, rcmClause: r.rcmClause || '', docsReceived: true, contractDocs: uploadDocs(r, docMap), historyNote: 'Added from contract PDF ' + contract.file + '. ' + signLabel + '.' };
       if (!r.bpName) plan.notes.push('The BP name was not found in the PDF: type it in.');
       return plan;
     }
 
     // Existing BP. A contract counts as older only if it starts earlier AND was not signed later than the one in the tracker
     // (a revised annex can be signed in July with an effective date in May).
-    const signedDate = (con) => { const sb2 = (con && con.signedBy) || {}; return [sb2.surya, sb2.bp].filter(isDate).sort().pop() || null; };
-    const newSigned = [r.signedBy && r.signedBy.surya, r.signedBy && r.signedBy.bp, r.signedOn].filter(isDate).sort().pop() || null;
-    const oldSigned = signedDate(c.contract);
-    // Signing dates decide first; the effective date only when they are missing or the same
-    let isOlder = false;
-    if (c.contract) {
-      if (newSigned && oldSigned && newSigned !== oldSigned) isOlder = newSigned < oldSigned;
-      else isOlder = !!(c.contract.effectiveFrom && r.effectiveFrom && r.effectiveFrom < c.contract.effectiveFrom);
-    }
-    if (signed && isOlder && c.stage === 'Signed') {
+    // Each document is compared with the SAME document already in the tracker (Vehicles Annex with Vehicles Annex…),
+    // so adding the pending documents later never needs the ones that are already attached.
+    const known = knownDocs(c);
+    const incoming = uploadDocs(r, docMap);
+    const incKeys = Object.keys(incoming);
+    // A revised Lines Annex (other lines) or Vehicles Annex (other mileage) is never an earlier version, even when not signed yet
+    const revised = { lines: lines.length > 0 && lineDiff(c.lines, lines).length > 0, vehicles: !!(r.annualMileage && r.annualMileage !== c.annualMileage) };
+    const olderKeys = incKeys.filter((k) => olderDoc(k, incoming[k], known[k], revised[k]));
+    const isOlder = incKeys.length > 0 && olderKeys.length === incKeys.length;
+    plan.kept = DOC_TYPES.filter(([k]) => known[k] && !incoming[k]).map(([k, n]) => ({ key: k, name: n, status: known[k].status, signedOn: known[k].signedOn }));
+    if (isOlder) {
       plan.kind = 'none';
-      plan.notes.push(newSigned && oldSigned && newSigned !== oldSigned
-        ? `This contract was signed on ${newSigned}, before the one already in the tracker (signed ${oldSigned}), so nothing is changed.`
-        : `This contract (effective ${r.effectiveFrom}) is older than the one already in the tracker (effective ${c.contract.effectiveFrom}), so nothing is changed.`);
+      const k0 = olderKeys[0], a = incoming[k0], b = known[k0];
+      plan.notes.push(olderKeys.length > 1 ? `Every document in this upload is an earlier version of one already in the tracker (${olderKeys.map(docName).join(', ')}), so nothing is changed.`
+        : a.signedOn && b.signedOn && a.signedOn !== b.signedOn ? `This ${docName(k0)} was signed on ${a.signedOn}, before the one already in the tracker (signed ${b.signedOn}), so nothing is changed.`
+        : a.effectiveFrom && b.effectiveFrom && a.effectiveFrom !== b.effectiveFrom ? `This ${docName(k0)} (effective ${a.effectiveFrom}) is older than the one already in the tracker (effective ${b.effectiveFrom}), so nothing is changed.`
+        : `The tracker already has this ${docName(k0)} ${b.status === 'signed' ? 'signed' : 'in a later version'}, so nothing is changed.`);
       return plan;
+    }
+    // A document in this upload that is older than the one in the tracker is left out; the rest is used
+    olderKeys.forEach((k) => {
+      const a = incoming[k], b = known[k];
+      plan.notes.push(a.signedOn && b.signedOn && a.signedOn !== b.signedOn ? `The ${docName(k)} in this upload is older than the one already in the tracker, so the tracker keeps its ${docName(k)}.`
+        : `The tracker already has the ${docName(k)} ${b.status === 'signed' ? 'signed' : 'in a later version'}, so it keeps that one.`);
+      delete docMap[k]; delete incoming[k];
+    });
+    if (olderKeys.includes('lines')) lines.splice(0, lines.length);
+    if (olderKeys.includes('vehicles')) r = Object.assign({}, r, { annualMileage: null });
+    // The stage then follows only the documents that are used
+    if (olderKeys.length && Object.keys(incoming).length) {
+      const st = Object.values(incoming).map((x) => x.status);
+      const f2 = st.every((x) => x === 'signed') ? 'Signed' : st.some((x) => x === 'sent' || x === 'pending') ? 'Merchant signature pending' : st.some((x) => x === 'surya') ? 'Surya signature pending' : null;
+      if (f2) { flowStage = f2; signed = f2 === 'Signed'; }
     }
     // RT kms are never filled in from the revenue report: a contract without them is flagged red in Needs attention
     const diff = lines.length ? lineDiff(c.lines, lines) : [];
     // Lines that didn't change keep the date they started
     lines.forEach((l) => { if (diff.some((d) => d.code === l.code)) return; const o = c.lines.find((x) => x.code === l.code); const f = o && lineFrom(c, o); if (f) l.from = f; else delete l.from; });
     const mileage = r.annualMileage && r.annualMileage !== c.annualMileage ? { from: c.annualMileage, to: r.annualMileage } : null;
+    plan.mileageAfter = mileage ? mileage.to : c.annualMileage;
     const text = diff.map(describeDiff).filter(Boolean);
     plan.diff = diff;
     plan.unchanged = lines.length ? lines.filter((l) => !diff.some((d) => d.code === l.code)).map((l) => l.code) : [];
@@ -760,17 +845,36 @@
       plan.kind = 'none'; plan.notes.push('Same lines and mileage as the signed contract already in the tracker. Nothing to update.');
       return plan;
     }
+    // "Signed" only when no other required document is still out for signature in DocuSign
+    const reqDocs = requiredDocs({ bpType });
+    const stageNow = patch.stage || c.stage;
+    if (stageNow === 'Signed') {
+      const waiting = reqDocs.filter((k) => !incoming[k] && ['sent', 'pending', 'surya'].includes(docsAfter[k]));
+      if (waiting.length) {
+        const st = waiting.some((k) => docsAfter[k] !== 'surya') ? 'Merchant signature pending' : 'Surya signature pending';
+        for (let i = text.length - 1; i >= 0; i--) if (/^Stage: .* → Signed/.test(text[i])) text.splice(i, 1);
+        if (st !== c.stage) { patch.stage = st; text.push(`Stage: ${c.stage} → ${st} (${waiting.map(docName).join(', ')} still waiting for signature)`); }
+        else delete patch.stage;
+      }
+    }
     if (c.pendingContract) patch.pendingContract = null;
-    if (text.length) patch.contract = contract;
+    // Keep every document attached before: the contract record lists them all, newest version of each
+    const replacedDocs = incKeys.filter((k) => incoming[k]);
+    plan.contractAfter = mergeContract(c.contract, contract, replacedDocs, lines.length > 0);
+    const docsMem = {}; Object.keys(known).forEach((k) => { docsMem[k] = Object.assign({}, known[k]); delete docsMem[k].earlier; });
+    incKeys.forEach((k) => { docsMem[k] = Object.assign({}, incoming[k], { at: (opts.now || new Date().toISOString()).slice(0, 10) }); });
+    plan.contractDocsAfter = docsMem;
+    if (!sameValue(c.contractDocs || null, docsMem)) patch.contractDocs = docsMem;
+    if (text.length) patch.contract = plan.contractAfter;
     else if (!c.contract || c.contract.envelopeId !== contract.envelopeId) {
       if (contract.envelopeId.length > 8 || !c.contract) {
-        patch.contract = Object.assign({}, contract, c.contract && !lines.length ? { documents: c.contract.documents + '; ' + contract.documents, effectiveFrom: c.contract.effectiveFrom || contract.effectiveFrom } : {});
+        patch.contract = plan.contractAfter;
         text.push('Lines, mileage and stage already match. Contract document recorded: ' + contract.documents + (contract.envelopeId.length > 8 ? ', envelope ' + contract.envelopeId.slice(0, 8) + '…' : ''));
       }
     }
     text.push(...docText);
     plan.changes = text;
-    if (!Object.keys(patch).length) { plan.kind = 'none'; plan.notes.push('Everything in this PDF already matches the tracker. Nothing to update.'); return plan; }
+    if (!Object.keys(patch).filter((k) => k !== 'contractDocs').length) { plan.kind = 'none'; plan.notes.push('Everything in this PDF already matches the tracker. Nothing to update.'); return plan; }
     patch.historyNote = 'Updated from contract PDF ' + contract.file + '. ' + signLabel + '. ' + text.join('; ');
     plan.patch = patch;
     return plan;
@@ -819,6 +923,6 @@
     STAGES, REJECTED, ALL_STAGES, OPTIONS, FIELDS, STALE_DAYS, MING_TOLERANCE,
     normaliseLine, editLine, createContract, updateContract, rejectContract, resendContract,
     latestRejection, daysInStage, checklist, flags, totals, mingCheck, seedContracts, blankContract, nameKey, findDuplicate, duplicateLines, matchBp, lineDiff, describeDiff, planFromPdf, DOC_TYPES, DOC_STATUS, BP_TYPES, requiredDocs, docCheck, mergeDocs, withDocDefaults, sameValue, similarBps, nameScore, lineFrom, fillFromReport, sameBp, lineKey,
-    reportPeriod, normaliseReport, addReport, deriveRevenueReport, contractFromReport, payoutBetween, fyQuarter, lineHistory, overlapDays,
+    reportPeriod, normaliseReport, knownDocs, mergeContract, addReport, deriveRevenueReport, contractFromReport, payoutBetween, fyQuarter, lineHistory, overlapDays,
   };
 });

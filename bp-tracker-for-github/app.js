@@ -1251,7 +1251,7 @@
       fld('bpName').value = c.bpName; fld('region').value = c.region || 'N/W'; fld('owner').value = c.owner || myName(); fld('comments').value = c.comments || '';
       const stage = (p.patch && p.patch.stage) || c.stage;
       fld('stage').innerHTML = C.ALL_STAGES.map((o) => `<option>${esc(o)}</option>`).join(''); fld('stage').value = stage;
-      const am = p.kind !== 'none' && r.annualMileage ? r.annualMileage : c.annualMileage;
+      const am = p.kind !== 'none' && p.mileageAfter !== undefined ? p.mileageAfter : p.kind !== 'none' && r.annualMileage ? r.annualMileage : c.annualMileage;
       fld('annualMileage').value = yes(am) ? am : '';
       newLines = p.kind !== 'none' && p.lines.length ? p.lines.map((l) => Object.assign({}, l)) : c.lines.map((l) => Object.assign({}, l));
       setTag('bpName', false); setTag('region', false);
@@ -1289,8 +1289,11 @@
       cls = 'upd'; title = `↻ ${esc(c.bpName)} is already in the tracker – this will update it`;
       p.changes.forEach((t) => items.push(esc(t)));
       (p.unchanged || []).forEach((code) => items.push(esc(code) + ': no change'));
+      p.notes.forEach((n) => items.push(esc(n)));
       if (p.match && p.match.how === 'similar') items.push(`Name in the PDF: “${esc(r.bpName)}”. <button type="button" class="link-btn" id="pdf-not-same">It's a different BP</button>`);
     }
+    // Documents already in the tracker that this upload doesn't include: kept as they are, no need to attach them again
+    if (c && p.kept && p.kept.length) items.push('Already in the tracker, kept as it is: ' + p.kept.map((d) => `<b>${esc(d.name)}</b> (${esc(C.DOC_STATUS[d.status] || d.status)}${d.signedOn ? ', ' + esc(fmtD(d.signedOn)) : ''})`).join(', ') + '. No need to attach these again.');
     const warns = r.warnings.map((w) => !c ? w : /^No Vehicles Annex/.test(w) ? 'This PDF has no Vehicles Annex, so annual mileage is left as it is.' : /^No Lines Annex/.test(w) ? 'This PDF has no Lines Annex, so the lines are left as they are.' : w);
     $('#pdf-banner').hidden = false;
     $('#pdf-banner').innerHTML = `<div class="bar ${cls}"><b>${title}</b>${list(items)}</div>` + (warns.length ? `<div class="bar warn"><b>Please check</b>${list(warns.map(esc))}</div>` : '');
@@ -1316,13 +1319,14 @@
       if (p && p.bp) {
         const c = byId(p.bp.id);
         const ch = Object.assign({}, body);
-        if (p.kind !== 'none') ch.contract = p.patch && p.patch.contract ? p.patch.contract : p.contract;
+        // Keep every document attached before (the contract record lists them all) and remember each one separately
+        if (p.kind !== 'none') { ch.contract = p.patch && p.patch.contract ? p.patch.contract : p.contractAfter || p.contract; if (p.contractDocsAfter) ch.contractDocs = p.contractDocsAfter; }
         if (c.pendingContract) ch.pendingContract = null;
         ch.historyNote = 'Updated from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.' + (p.changes.length ? ' ' + p.changes.join('; ') : '');
         saved = await api.update(c, ch);
         if (saved.updatedAt === c.updatedAt) { $('#new-error').textContent = 'Nothing changed.'; return; }
       } else {
-        if (p) { body.contract = p.contract; body.docsReceived = true; body.historyNote = 'Added from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.'; }
+        if (p) { body.contract = p.contract; body.docsReceived = true; if (p.body && p.body.contractDocs) body.contractDocs = p.body.contractDocs; body.historyNote = 'Added from contract PDF ' + p.contract.file + '. ' + p.signLabel + '.'; }
         saved = await api.create(body);
       }
       upsert(saved); $('#dlg-new').close(); renderAll(); openDrawer(saved.id);
