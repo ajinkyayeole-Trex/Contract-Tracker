@@ -126,11 +126,21 @@
     if (!rows || !rows.length) throw new Error('Only the admin can change roles.');
     return rows[0];
   }
+  // Add / reset / remove team logins from the tracker (Edge Function "team-admin", admin only)
+  async function teamAdmin(body) {
+    try { return await call('/functions/v1/team-admin', { method: 'POST', body }); }
+    catch (e) {
+      if (e.status === 404 || /reach the database/.test(e.message)) {
+        const x = new Error('Adding team members from here needs the one-time Supabase setup (the “team-admin” function). Follow the setup steps, then try again.'); x.setup = true; throw x;
+      }
+      throw e;
+    }
+  }
   async function setName(id, name) {
     const rows = await call('/rest/v1/profiles?id=eq.' + encodeURIComponent(id), { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: { name: String(name).trim() } });
     if (!rows || !rows.length) throw new Error('Only the admin can change names.');
     return rows[0];
   }
 
-  root.SbStore = { configured, login, restore, logout, changePassword, profile, list, getOne, insert, update, remove, upsertMany, team, setRole, setName, user: () => (session ? session.user : null) };
+  root.SbStore = { configured, login, restore, logout, changePassword, profile, list, getOne, insert, update, remove, upsertMany, team, setRole, setName, teamAdmin, user: () => (session ? session.user : null) };
 })(typeof self !== 'undefined' ? self : this);

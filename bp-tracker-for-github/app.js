@@ -243,13 +243,55 @@
 
   // ---------- Supabase: team and password ----------
   async function openTeam() {
-    $('#team-error').textContent = ''; $('#team-list').innerHTML = '<li class="muted">Loading…</li>'; $('#dlg-team').showModal();
+    $('#team-error').textContent = ''; teamDone(''); $('#team-list').innerHTML = '<li class="muted">Loading…</li>'; $('#dlg-team').showModal();
     try { drawTeam(await SbStore.team()); } catch (e) { $('#team-error').textContent = e.message; }
   }
   function drawTeam(rows) {
+    state.team = rows;
     const opt = (r, v, l) => `<option value="${v}"${r.role === v ? ' selected' : ''}>${l}</option>`;
-    $('#team-list').innerHTML = rows.map((r) => `<li><span><b>${esc(r.name || r.email)}</b><small>${esc(r.email)}</small></span>
-      <select class="sel sm" data-role-for="${esc(r.id)}">${opt(r, 'viewer', 'View only')}${opt(r, 'editor', 'Editor')}${opt(r, 'admin', 'Admin')}</select></li>`).join('') || '<li class="muted">Nobody yet</li>';
+    const meId = (SbStore.user() || {}).id;
+    $('#team-list').innerHTML = rows.map((r) => `<li><span><b>${esc(r.name || r.email)}${r.id === meId ? ' <small class="you">(you)</small>' : ''}</b><small>${esc(r.email)}</small></span>
+      <select class="sel sm" data-role-for="${esc(r.id)}">${opt(r, 'viewer', 'View only')}${opt(r, 'editor', 'Editor')}${opt(r, 'admin', 'Admin')}</select>
+      <button type="button" class="gh-btn sm" data-team-pw="${esc(r.id)}">New password</button>${r.id === meId ? '' : `<button type="button" class="link-btn rd" data-team-rm="${esc(r.id)}">Remove</button>`}</li>`).join('') || '<li class="muted">Nobody yet</li>';
+  }
+  // ---- Add a member / new password / remove, without opening Supabase ----
+  function genPassword() {
+    const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    const a = new Uint32Array(10); crypto.getRandomValues(a);
+    return Array.from(a, (n) => abc[n % abc.length]).join('') + '@' + (2 + (a[0] % 8));
+  }
+  function teamDone(html) { const d = $('#team-done'); d.hidden = !html; d.innerHTML = html || ''; }
+  const loginNote = (email, pw) => `<div class="copyline"><span>Tracker: <b>${esc(location.origin + location.pathname)}</b><br>Login ID: <b>${esc(email)}</b><br>Password: <b class="mono">${esc(pw)}</b></span>
+    <button type="button" class="gh-btn sm" data-copy="${esc(`BP Contract Tracker: ${location.origin + location.pathname}\nLogin ID: ${email}\nPassword: ${pw}`)}">Copy</button></div>`;
+  async function addMember(e) {
+    e.preventDefault();
+    const f = e.target; const v = (n) => $('[name=' + n + ']', f).value.trim();
+    $('#team-error').textContent = ''; teamDone('');
+    const btn = $('#btn-team-add'); btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      const out = await SbStore.teamAdmin({ action: 'add', name: v('name'), email: v('email'), password: $('[name=password]', f).value, role: v('role') });
+      const m = out.member || {};
+      teamDone(`<b>✓ ${esc(m.name || v('name') || v('email'))} can log in now</b> (${esc({ viewer: 'View only', editor: 'Editor', admin: 'Admin' }[m.role] || m.role)}). Send them this:` + loginNote(m.email || v('email'), $('[name=password]', f).value));
+      f.reset(); drawTeam(await SbStore.team());
+    } catch (err) { $('#team-error').textContent = err.message; }
+    finally { btn.disabled = false; btn.textContent = '＋ Add member'; }
+  }
+  async function teamAction(el) {
+    const id = el.dataset.teamPw || el.dataset.teamRm; const r = (state.team || []).find((x) => x.id === id) || {};
+    const who = r.name || r.email || 'this member';
+    $('#team-error').textContent = ''; teamDone('');
+    try {
+      if (el.dataset.teamPw) {
+        const pw = prompt(`New password for ${who} (at least 8 characters):`, genPassword()); if (pw === null) return;
+        await SbStore.teamAdmin({ action: 'password', id, password: pw });
+        teamDone(`<b>✓ New password set for ${esc(who)}.</b> Send them this:` + loginNote(r.email || '', pw));
+      } else {
+        const weekly = /^weekly/i.test(r.email || '');
+        if (!confirm(`Remove ${who} (${r.email})?\n\nThey can no longer open the tracker.` + (weekly ? '\n\nThis is the login the weekly revenue report check uses: the weekly check will stop working.' : ''))) return;
+        await SbStore.teamAdmin({ action: 'remove', id });
+        toast(`${who} removed`); drawTeam(await SbStore.team());
+      }
+    } catch (err) { $('#team-error').textContent = err.message; }
   }
   async function changeRole(sel) {
     $('#team-error').textContent = '';
@@ -1706,6 +1748,10 @@
     }
     if ($('#dlg-team')) {
       $('#team-list').addEventListener('change', (e) => { if (e.target.dataset.roleFor) changeRole(e.target); });
+      $('#team-list').addEventListener('click', (e) => { const b = e.target.closest('[data-team-pw],[data-team-rm]'); if (b) teamAction(b); });
+      $('#form-team-add').addEventListener('submit', addMember);
+      $('#btn-gen-pw').addEventListener('click', () => { $('#form-team-add [name=password]').value = genPassword(); });
+      $('#team-done').addEventListener('click', async (e) => { const c = e.target.closest('[data-copy]'); if (!c) return; try { await navigator.clipboard.writeText(c.dataset.copy); toast('Copied'); } catch (err) { toast('Select the text and copy it'); } });
       $('#dlg-team [data-cancel]').addEventListener('click', () => $('#dlg-team').close());
       $('#form-chpw').addEventListener('submit', doChangePassword);
       $('#dlg-chpw [data-cancel]').addEventListener('click', () => $('#dlg-chpw').close());
